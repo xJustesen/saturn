@@ -17,6 +17,9 @@ use crate::app::AppEvent;
 /// Largest factor by which a raster image is enlarged to fill the popout.
 pub const MAX_UPSCALE: u32 = 4;
 
+/// Kitty placeholder diacritics only exist for 297 rows/columns.
+pub const KITTY_MAX_CELLS: u16 = 297;
+
 pub enum ImageState {
     Pending,
     Ready(SlicedProtocol),
@@ -48,6 +51,24 @@ impl ImageStore {
         self.picker.protocol_type()
     }
 
+    /// Largest image the protocol can place, in cells. Kitty unicode
+    /// placeholders address rows and columns with a table of 297 diacritics,
+    /// and ratatui-image leaves cells beyond that undrawn.
+    pub fn max_cells(&self) -> Option<u16> {
+        match self.picker.protocol_type() {
+            ProtocolType::Kitty => Some(KITTY_MAX_CELLS),
+            _ => None,
+        }
+    }
+
+    /// Clamp a `cols`×`rows` box to what the protocol can draw.
+    pub fn clamp_box(&self, cols: u16, rows: u16) -> (u16, u16) {
+        match self.max_cells() {
+            Some(m) => (cols.min(m), rows.min(m)),
+            None => (cols, rows),
+        }
+    }
+
     pub fn is_halfblocks(&self) -> bool {
         matches!(self.picker.protocol_type(), ProtocolType::Halfblocks)
     }
@@ -76,6 +97,7 @@ impl ImageStore {
             .into_dimensions()
             .ok()?;
         let font = self.picker.font_size();
+        let (max_cols, max_rows) = self.clamp_box(max_cols, max_rows);
         let (cols, rows) = if upscale {
             fit_cells(px_w.saturating_mul(MAX_UPSCALE), px_h.saturating_mul(MAX_UPSCALE), font, max_cols, max_rows)
         } else {

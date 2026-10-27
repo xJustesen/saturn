@@ -300,6 +300,8 @@ fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
     let wrap = ctx.cfg.wrap;
     let Box { width, max_rows, popout } = bx;
     let w = width as usize;
+    // Figures are sized to the box the protocol can actually draw.
+    let (width, max_rows) = ctx.images.clamp_box(width, max_rows);
     let Some(mut m) = richest(data) else {
         return placeholder("[no displayable output]");
     };
