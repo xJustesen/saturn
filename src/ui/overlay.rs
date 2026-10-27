@@ -13,12 +13,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::commands::Command;
+use crate::ui::popout::PopoutState;
 
 pub enum Overlay {
     Palette(PaletteState),
     Prompt(PromptState),
     Confirm(ConfirmState),
     Help,
+    /// Drawn by [`crate::ui::popout`], not here.
+    Popout(PopoutState),
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +210,7 @@ pub fn render(buf: &mut Buffer, area: Rect, overlay: &mut Overlay) {
         Overlay::Prompt(p) => render_prompt(buf, area, p),
         Overlay::Confirm(c) => render_confirm(buf, area, c),
         Overlay::Help => render_help(buf, area),
+        Overlay::Popout(_) => {}
     }
 }
 
@@ -305,6 +309,7 @@ NOTEBOOK (command mode)            CELL EDITING
   Ctrl+_         split at cursor      0 0          restart kernel
   u / Ctrl+R     undo / redo cell op
   o / O          toggle / clear outputs
+  z              inspect output (popout)
                                     FILES & UI
   K              select kernel        Ctrl+S   save
   Ctrl+P         command palette      Ctrl+O   open file / browse

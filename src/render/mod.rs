@@ -144,7 +144,7 @@ impl RenderCache {
     }
 }
 
-fn output_key(o: &Output, expanded: bool) -> u64 {
+pub fn output_key(o: &Output, expanded: bool) -> u64 {
     let mut h = blake3::Hasher::new();
     h.update(&[expanded as u8]);
     match o {
@@ -238,9 +238,30 @@ fn plain_alt(media: &Media) -> Option<&str> {
     })
 }
 
+/// How much room an output may take.
+#[derive(Clone, Copy)]
+pub struct Box {
+    pub width: u16,
+    /// Tallest image, in rows.
+    pub max_rows: u16,
+    /// Popout rendering: fill the box (images are enlarged, plotly figures are
+    /// re-rendered at the box's pixel size) and never truncate text.
+    pub popout: bool,
+}
+
 fn render_output(o: &Output, width: u16, ctx: &mut OutputCtx) -> Rendered {
+    let max_rows = if ctx.images.is_halfblocks() {
+        ctx.cfg.max_image_rows_halfblocks
+    } else {
+        ctx.cfg.max_image_rows
+    };
+    render_output_in(o, Box { width, max_rows, popout: false }, ctx)
+}
+
+pub fn render_output_in(o: &Output, bx: Box, ctx: &mut OutputCtx) -> Rendered {
     let tab = ctx.cfg.tab_width;
     let wrap = ctx.cfg.wrap;
+    let width = bx.width;
     let w = width as usize;
     match o {
         Output::Stream { name, text } => {
@@ -261,42 +282,72 @@ fn render_output(o: &Output, width: u16, ctx: &mut OutputCtx) -> Rendered {
             let t = truncate_stream(t, ctx.cfg.stream_max_lines, ctx.expanded);
             Rendered::Text(wrap_text(t, w, tab, wrap))
         }
-        Output::DisplayData { data, .. } | Output::ExecuteResult { data, .. } => {
-            render_media(data, width, ctx)
-        }
+        Output::DisplayData { data, .. } | Output::ExecuteResult { data, .. } => render_media(data, bx, ctx),
     }
 }
 
-fn render_media(data: &Media, width: u16, ctx: &mut OutputCtx) -> Rendered {
+/// Key under which the popout stores an image rendered for a `cols`×`rows` box.
+pub fn sized_key(hash: u64, cols: u16, rows: u16) -> u64 {
+    let mut h = blake3::Hasher::new();
+    h.update(&hash.to_le_bytes());
+    h.update(&cols.to_le_bytes());
+    h.update(&rows.to_le_bytes());
+    u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
+}
+
+fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
     let tab = ctx.cfg.tab_width;
     let wrap = ctx.cfg.wrap;
+    let Box { width, max_rows, popout } = bx;
     let w = width as usize;
-    let max_rows = if ctx.images.is_halfblocks() {
-        ctx.cfg.max_image_rows_halfblocks
-    } else {
-        ctx.cfg.max_image_rows
-    };
-    let Some(m) = richest(data) else {
+    let Some(mut m) = richest(data) else {
         return placeholder("[no displayable output]");
+    };
+    // In the popout a plotly figure is re-rendered at the popout's own pixel
+    // size, which beats any (small) PNG that came with it.
+    if popout && ctx.plotly.usable()
+        && let Some(fig) = data.content.iter().find(|m| matches!(m, MediaType::Plotly(_)))
+    {
+        m = fig;
+    }
+    let store_image = |images: &mut ImageStore, hash: u64, bytes: Vec<u8>| -> Option<(u64, u16, u16)> {
+        if popout {
+            let key = sized_key(hash, width, max_rows);
+            images.ensure_fit(key, bytes, width, max_rows, true).map(|(c, r)| (key, c, r))
+        } else {
+            images.ensure_bytes(hash, bytes, width, max_rows).map(|(c, r)| (hash, c, r))
+        }
     };
     match m {
         MediaType::Png(b64) | MediaType::Jpeg(b64) | MediaType::Gif(b64) => {
             let hash = hash_bytes(b64.as_bytes());
-            match ctx.images.ensure_b64(hash, b64, width, max_rows) {
-                Some((cols, rows)) => Rendered::Image { hash, cols, rows },
+            if !popout && let Some(e) = ctx.images.get(hash) {
+                return Rendered::Image { hash, cols: e.cols, rows: e.rows };
+            }
+            let cleaned: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cleaned.as_bytes()).ok();
+            match bytes.and_then(|b| store_image(ctx.images, hash, b)) {
+                Some((hash, cols, rows)) => Rendered::Image { hash, cols, rows },
                 None => placeholder("[image: cannot decode]"),
             }
         }
         MediaType::Plotly(fig) => {
-            let hash = hash_bytes(fig.to_string().as_bytes());
+            let fig_hash = hash_bytes(fig.to_string().as_bytes());
             let fs = ctx.images.font_size();
-            let px_w = u32::from(width.min(120)) * u32::from(fs.width.max(1));
-            let px_h = u32::from(max_rows) * u32::from(fs.height.max(1));
+            let (hash, px_w, px_h) = if popout {
+                let px_w = u32::from(width) * u32::from(fs.width.max(1));
+                let px_h = u32::from(max_rows) * u32::from(fs.height.max(1));
+                (sized_key(fig_hash, width, max_rows), px_w, px_h)
+            } else {
+                let px_w = u32::from(width.min(120)) * u32::from(fs.width.max(1));
+                let px_h = u32::from(max_rows) * u32::from(fs.height.max(1));
+                (fig_hash, px_w, px_h)
+            };
             match ctx.plotly.request(hash, fig, px_w, px_h) {
                 plotly::PlotlyState::Ready(png) => {
                     let img_hash = hash_bytes(&png);
-                    match ctx.images.ensure_bytes(img_hash, png.to_vec(), width, max_rows) {
-                        Some((cols, rows)) => Rendered::Image { hash: img_hash, cols, rows },
+                    match store_image(ctx.images, img_hash, png.to_vec()) {
+                        Some((hash, cols, rows)) => Rendered::Image { hash, cols, rows },
                         None => placeholder("[plotly: bad png from sidecar]"),
                     }
                 }

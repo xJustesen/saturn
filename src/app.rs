@@ -33,6 +33,7 @@ use crate::ui::overlay::{
     ConfirmKind, ConfirmState, ItemData, Overlay, PaletteAction, PaletteItem, PaletteKind,
     PaletteState, PromptKind, PromptState,
 };
+use crate::ui::popout::{PopoutAction, PopoutState};
 
 pub enum AppEvent {
     Terminal(Event),
@@ -475,6 +476,12 @@ impl App {
                     self.overlay = None;
                 }
             }
+            Overlay::Popout(p) => {
+                let n = self.nb.cells.get(p.cell).map(|c| c.outputs.len()).unwrap_or(0);
+                if let PopoutAction::Close = p.handle_key(key, n) {
+                    self.close_popout();
+                }
+            }
             Overlay::Confirm(c) => {
                 let kind = c.kind.clone();
                 match key.code {
@@ -664,6 +671,7 @@ impl App {
                 None => self.flash("nothing to redo"),
             },
             Command::ToggleOutputs => self.toggle_outputs(),
+            Command::PopoutOutput => self.open_popout(),
             Command::ClearOutputs => {
                 let idx = self.focused;
                 if let Some(cell) = self.nb.cells.get_mut(idx) {
@@ -1034,6 +1042,26 @@ impl App {
         self.cache.invalidate_outputs(&id);
         self.layout.invalidate_cell(idx);
         self.scroll_to_focused();
+    }
+
+    fn open_popout(&mut self) {
+        if self.mode == Mode::Edit {
+            self.leave_edit();
+        }
+        let idx = self.focused;
+        let Some(cell) = self.nb.cells.get(idx) else { return };
+        if cell.outputs.is_empty() {
+            self.flash("no outputs");
+            return;
+        }
+        let output = PopoutState::default_output(cell);
+        self.overlay = Some(Overlay::Popout(PopoutState::new(idx, cell.id.clone(), output, self.cfg.wrap)));
+    }
+
+    fn close_popout(&mut self) {
+        if let Some(Overlay::Popout(p)) = self.overlay.take() {
+            p.close(&mut self.images);
+        }
     }
 
     /// If the cell has a plotly figure that could not be rendered, write its

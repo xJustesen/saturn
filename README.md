@@ -57,7 +57,7 @@ Notebook (command mode):
 | `Ctrl+_` | split cell at cursor (while editing) | `Ctrl+O` | open file / browse |
 | `u` / `Ctrl+R` | undo / redo cell operation | `Ctrl+P` | command palette |
 | `o` / `O` | toggle (or expand) / clear outputs | `?` | help |
-| | | `q` | quit |
+| `z` | inspect output in a popout | `q` | quit |
 
 Inside a cell the editor is vim-modal (`hjkl`, `dd`, `yy`, `p`, `ciw`, `v`, `/`, `u`, …).
 `Shift+Enter`, `Ctrl+Enter`, `Alt+Enter`, `Ctrl+S`, `Ctrl+P`, `Ctrl+C` and `Ctrl+Q`
@@ -66,6 +66,13 @@ work in every mode. Shift+Enter needs a terminal with the kitty keyboard protoco
 
 With a plotly figure that could not be rendered, `o` writes its HTML to the cache
 directory and opens it in the browser.
+
+`z` opens the focused cell's output in a popout that fills the terminal and follows
+it when it is resized. Figures are drawn as large as the popout allows: plotly figures
+are re-rendered by the sidecar at the popout's pixel size, PNGs are scaled up (at most
+4×). Text outputs are shown in full, without truncation. Inside the popout: `j`/`k`,
+`Ctrl+D`/`Ctrl+U`, `g`/`G` scroll, `w` toggles wrapping, `h`/`l` pan when unwrapped,
+`Tab`/`Shift+Tab` (or `n`/`p`) switch between the cell's outputs, `Esc`/`q`/`z` close.
 
 ## Configuration
 

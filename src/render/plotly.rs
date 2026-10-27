@@ -97,6 +97,11 @@ impl PlotlySidecar {
         }
     }
 
+    /// Whether new render requests can succeed (sidecar not dead or disabled).
+    pub fn usable(&self) -> bool {
+        self.enabled && self.fatal.is_none()
+    }
+
     pub fn complete(&mut self, hash: u64, result: Result<Vec<u8>, String>) {
         self.pending.remove(&hash);
         match result {

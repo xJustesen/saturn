@@ -96,6 +96,7 @@ const COMMAND: &[(&[Key], Command)] = &[
     (&[ctrl('r')], Command::RedoCellOp),
     (&[ch('o')], Command::ToggleOutputs),
     (&[ch('O')], Command::ClearOutputs),
+    (&[ch('z')], Command::PopoutOutput),
     (&[ch('0'), ch('0')], Command::RestartKernel),
     (&[ch('I')], Command::InterruptKernel),
     (&[ch('K')], Command::SelectKernel),

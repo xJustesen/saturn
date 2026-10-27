@@ -6,14 +6,16 @@
 use std::collections::HashMap;
 use std::io::Cursor;
 
-use base64::Engine;
 use ratatui::layout::Size;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::sliced::SlicedProtocol;
-use ratatui_image::{FontSize, Resize};
+use ratatui_image::{FilterType, FontSize, Resize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::AppEvent;
+
+/// Largest factor by which a raster image is enlarged to fill the popout.
+pub const MAX_UPSCALE: u32 = 4;
 
 pub enum ImageState {
     Pending,
@@ -54,21 +56,18 @@ impl ImageStore {
         self.entries.get(&hash)
     }
 
-    pub fn ensure_b64(&mut self, hash: u64, b64: &str, max_cols: u16, max_rows: u16) -> Option<(u16, u16)> {
-        if let Some(e) = self.entries.get(&hash) {
-            return Some((e.cols, e.rows));
-        }
-        let cleaned: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(cleaned.as_bytes())
-            .ok()?;
-        self.ensure_bytes(hash, bytes, max_cols, max_rows)
-    }
-
     /// Register raw encoded image bytes (PNG/JPEG/GIF). Returns the cell size
     /// the image will occupy, kicking off decoding in the background.
     pub fn ensure_bytes(&mut self, hash: u64, bytes: Vec<u8>, max_cols: u16, max_rows: u16) -> Option<(u16, u16)> {
-        if let Some(e) = self.entries.get(&hash) {
+        self.ensure_fit(hash, bytes, max_cols, max_rows, false)
+    }
+
+    /// Like [`ensure_bytes`](Self::ensure_bytes), but stored under an explicit
+    /// `key` (so the same image can exist at several sizes). With `upscale`,
+    /// images smaller than the box are enlarged (up to [`MAX_UPSCALE`]×) to
+    /// fill it, as in the output popout.
+    pub fn ensure_fit(&mut self, key: u64, bytes: Vec<u8>, max_cols: u16, max_rows: u16, upscale: bool) -> Option<(u16, u16)> {
+        if let Some(e) = self.entries.get(&key) {
             return Some((e.cols, e.rows));
         }
         let (px_w, px_h) = ::image::ImageReader::new(Cursor::new(&bytes))
@@ -76,25 +75,31 @@ impl ImageStore {
             .ok()?
             .into_dimensions()
             .ok()?;
-        let (cols, rows) = fit_cells(px_w, px_h, self.picker.font_size(), max_cols, max_rows);
-        self.entries.insert(hash, ImageEntry { state: ImageState::Pending, cols, rows });
+        let font = self.picker.font_size();
+        let (cols, rows) = if upscale {
+            fit_cells(px_w.saturating_mul(MAX_UPSCALE), px_h.saturating_mul(MAX_UPSCALE), font, max_cols, max_rows)
+        } else {
+            fit_cells(px_w, px_h, font, max_cols, max_rows)
+        };
+        self.entries.insert(key, ImageEntry { state: ImageState::Pending, cols, rows });
         let picker = self.picker.clone();
         let tx = self.tx.clone();
         tokio::task::spawn_blocking(move || {
+            let resize = if upscale { Resize::Scale(Some(FilterType::CatmullRom)) } else { Resize::Fit(None) };
             let result = ::image::load_from_memory(&bytes)
                 .map_err(|e| e.to_string())
                 .and_then(|img| {
-                    SlicedProtocol::new_with_resize(
-                        &picker,
-                        img,
-                        Size { width: cols, height: rows },
-                        Resize::Fit(None),
-                    )
-                    .map_err(|e| e.to_string())
+                    SlicedProtocol::new_with_resize(&picker, img, Size { width: cols, height: rows }, resize)
+                        .map_err(|e| e.to_string())
                 });
-            let _ = tx.send(AppEvent::ImageReady { hash, result });
+            let _ = tx.send(AppEvent::ImageReady { hash: key, result });
         });
         Some((cols, rows))
+    }
+
+    /// Drop an entry (e.g. a popout-sized render that is no longer shown).
+    pub fn remove(&mut self, key: u64) {
+        self.entries.remove(&key);
     }
 
     pub fn set_result(&mut self, hash: u64, result: Result<SlicedProtocol, String>) {
