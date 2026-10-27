@@ -1,5 +1,11 @@
 //! Plotly figures are rendered to PNG by a sidecar Python process
-//! (`uv run --with plotly --with kaleido`), lazily started on first use.
+//! (`uv run --no-project --with plotly --with kaleido`), lazily started on first use.
+//!
+//! The sidecar must not see the notebook's Python project: run from a project
+//! directory (or with a virtualenv active), uv would layer kaleido on top of the
+//! project's environment, picking up its plotly pin (kaleido 1.x needs plotly >= 6.1.1)
+//! and locking/syncing the project as a side effect. So it runs with `--no-project`,
+//! from saturn's cache directory, with any active environment hidden.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -139,12 +145,18 @@ async fn run_sidecar(
     scale: f64,
 ) {
     let mut cmd = tokio::process::Command::new("uv");
-    cmd.args(["run", "--quiet", "--with", "plotly", "--with", "kaleido", "python"])
+    cmd.args(["run", "--quiet", "--no-project", "--with", "plotly", "--with", "kaleido", "python"])
         .arg(&script)
+        .env_remove("VIRTUAL_ENV")
+        .env_remove("CONDA_PREFIX")
+        .env_remove("UV_PYTHON")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
+    if let Some(dir) = script.parent() {
+        cmd.current_dir(dir);
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
