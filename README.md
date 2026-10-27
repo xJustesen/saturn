@@ -1,1 +1,93 @@
 # saturn
+
+A blazingly fast, keyboard-first Jupyter notebook for the terminal.
+
+- Opens, edits, runs and saves `.ipynb` files (nbformat 4.5, byte-stable round trips).
+- Talks to any Jupyter kernel directly over ZeroMQ (no Jupyter server needed).
+- Inline figures: matplotlib PNGs and plotly figures, drawn with the Kitty graphics
+  protocol (Ghostty, Kitty, WezTerm), iTerm2 or Sixel, falling back to unicode halfblocks
+  (e.g. inside tmux).
+- Vim-modal editing inside cells, Jupyter-style cell commands around them.
+- Fuzzy command palette, file browser and kernel picker.
+
+## Install
+
+```bash
+cargo install --path .
+```
+
+Requires a Rust toolchain. Kernels are discovered from the usual Jupyter data
+directories, from `uv tool` installs (e.g. `uv tool install jupyterlab`) and from
+`$VIRTUAL_ENV`; add more with `SATURN_KERNEL_DIRS=/path/to/share/jupyter:...`.
+
+Plotly figures that arrive without a PNG are rendered by a sidecar started on demand
+with `uv run --with plotly --with kaleido` (needs `uv` and Chrome/Chromium).
+If the kernel environment has `kaleido` installed, plotly emits PNGs itself and the
+sidecar is never started.
+
+## Usage
+
+```bash
+saturn notebook.ipynb        # open a notebook (kernel from its metadata)
+saturn                       # browse the current directory
+saturn dir/ --kernel python3 # browse a directory, force a kernelspec name
+```
+
+Logs go to `~/Library/Caches/saturn/saturn.log` (or `$XDG_CACHE_HOME/saturn`);
+`SATURN_LOG=debug` raises the level. Kernel stdout/stderr land in
+`kernel-<name>.log` next to it.
+
+## Keys
+
+Notebook (command mode):
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `j` / `k`, `↓` / `↑` | focus next / previous cell | `Enter` / `i` | edit cell (vim normal / insert) |
+| `gg` / `G` | first / last cell | `Esc` | (in vim normal mode) back to notebook |
+| `Ctrl+D` / `Ctrl+U` | half page down / up | `Shift+Enter` | run and advance |
+| `a` / `b` | insert cell above / below | `Ctrl+Enter` | run |
+| `dd` / `x` / `c` | delete / cut / copy cell | `Alt+Enter` | run and insert below |
+| `v` / `V` | paste below / above | `Ctrl+C` / `I` | interrupt kernel |
+| `Ctrl+K` / `Ctrl+J` | move cell up / down | `00` | restart kernel |
+| `m` / `y` / `r` | to markdown / code / raw | `K` | select kernel |
+| `M` | merge with cell below | `Ctrl+S` | save |
+| `Ctrl+_` | split cell at cursor (while editing) | `Ctrl+O` | open file / browse |
+| `u` / `Ctrl+R` | undo / redo cell operation | `Ctrl+P` | command palette |
+| `o` / `O` | toggle (or expand) / clear outputs | `?` | help |
+| | | `q` | quit |
+
+Inside a cell the editor is vim-modal (`hjkl`, `dd`, `yy`, `p`, `ciw`, `v`, `/`, `u`, …).
+`Shift+Enter`, `Ctrl+Enter`, `Alt+Enter`, `Ctrl+S`, `Ctrl+P`, `Ctrl+C` and `Ctrl+Q`
+work in every mode. Shift+Enter needs a terminal with the kitty keyboard protocol
+(Ghostty, Kitty, WezTerm, foot); elsewhere use `Alt+Enter` or `Ctrl+Enter`.
+
+With a plotly figure that could not be rendered, `o` writes its HTML to the cache
+directory and opens it in the browser.
+
+## Configuration
+
+`~/.config/saturn/config.toml` (all keys optional):
+
+```toml
+max_image_rows = 20            # tallest inline image, in rows
+max_image_rows_halfblocks = 12 # same when only halfblocks are available
+stream_max_lines = 500         # longer outputs are truncated until expanded with `o`
+persist_plotly_png = true      # store sidecar PNGs in the notebook so they survive
+plotly_scale = 2.0             # pixel scale for plotly renders
+theme = "base16-ocean.dark"    # syntect theme for code
+line_numbers = false
+tab_width = 4
+wrap = true
+show_hidden = false            # file browser
+```
+
+## Development
+
+```bash
+cargo build
+cargo test
+cargo run -- assets/sample.ipynb
+```
+
+`assets/make_sample.py` regenerates the sample notebook (needs matplotlib, plotly, pandas).
