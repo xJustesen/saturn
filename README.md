@@ -20,8 +20,12 @@ Requires a Rust toolchain. Kernels are discovered from the usual Jupyter data
 directories, from `uv tool` installs (e.g. `uv tool install jupyterlab`) and from
 `$VIRTUAL_ENV`; add more with `SATURN_KERNEL_DIRS=/path/to/share/jupyter:...`.
 
-Plotly figures that arrive without a PNG are rendered by a sidecar started on demand
+Plotly figures that arrive without a PNG are rendered by a sidecar started
 with `uv run --no-project --with plotly --with kaleido` (needs `uv` and Chrome/Chromium).
+It keeps one headless Chrome for the whole session, so after the first figure
+(which pays for the browser launch) renders take tens of milliseconds. The sidecar
+is started early when the notebook already holds plotly outputs or a code cell
+mentions plotly, and otherwise on first use.
 It runs in its own throwaway environment, so it never touches the notebook project's
 `uv.lock` or `.venv`, and the project's plotly version doesn't matter.
 If the kernel environment has `kaleido` installed, plotly emits PNGs itself and the

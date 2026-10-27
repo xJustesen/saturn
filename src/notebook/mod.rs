@@ -396,6 +396,18 @@ impl Notebook {
             .or_else(|| self.metadata.kernelspec.as_ref().and_then(|k| k.language.as_deref()))
     }
 
+    /// Any output carrying a plotly figure (which the sidecar may have to render).
+    pub fn has_plotly_outputs(&self) -> bool {
+        self.cells.iter().flat_map(|c| &c.outputs).filter_map(Output::media).any(|m| {
+            m.content.iter().any(|t| matches!(t, jupyter_protocol::MediaType::Plotly(_)))
+        })
+    }
+
+    /// Any code cell that looks like it produces plotly figures.
+    pub fn mentions_plotly(&self) -> bool {
+        self.cells.iter().any(|c| c.kind == CellKind::Code && c.source.contains("plotly"))
+    }
+
     pub fn set_kernelspec(&mut self, name: &str, display_name: &str, language: &str) {
         let changed = self.kernelspec_name() != Some(name);
         self.metadata.kernelspec = Some(v4::KernelSpec {

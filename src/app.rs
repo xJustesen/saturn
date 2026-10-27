@@ -1320,6 +1320,9 @@ impl App {
         self.kernel = Some(KernelHandle::launch(spec, cwd, self.tx.clone()));
         self.cache.invalidate_all();
         self.layout.invalidate_all();
+        if self.nb.mentions_plotly() {
+            self.plotly.warm();
+        }
     }
 
     fn restart_kernel(&mut self) {
@@ -1470,6 +1473,11 @@ impl App {
             self.lang_ext = language_extension(lang).to_string();
         }
         self.want_kernel = true;
+        // Launching the sidecar's browser takes over a second; get it going
+        // while the notebook is still being laid out.
+        if self.nb.has_plotly_outputs() {
+            self.plotly.warm();
+        }
         Ok(())
     }
 

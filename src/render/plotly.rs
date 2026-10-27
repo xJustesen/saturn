@@ -1,5 +1,9 @@
 //! Plotly figures are rendered to PNG by a sidecar Python process
-//! (`uv run --no-project --with plotly --with kaleido`), lazily started on first use.
+//! (`uv run --no-project --with plotly --with kaleido`), started on first use or,
+//! when a notebook looks like it will need it, warmed up ahead of time (see
+//! [`PlotlySidecar::warm`]): the sidecar keeps one headless Chrome for its whole
+//! life, and launching that browser is the slow part (over a second, against
+//! tens of milliseconds per figure once it is up).
 //!
 //! The sidecar must not see the notebook's Python project: run from a project
 //! directory (or with a virtualenv active), uv would layer kaleido on top of the
@@ -42,6 +46,9 @@ struct Response {
     png_base64: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    /// Sent once (with id 0) when the sidecar's browser is up.
+    #[serde(default)]
+    ready: bool,
 }
 
 pub struct PlotlySidecar {
@@ -94,6 +101,14 @@ impl PlotlySidecar {
             PlotlyState::Pending
         } else {
             PlotlyState::Failed(self.fatal.clone().unwrap_or_else(|| "sidecar unavailable".into()))
+        }
+    }
+
+    /// Start the sidecar now so its browser is up by the time a figure needs
+    /// it. A no-op once started, failed or disabled.
+    pub fn warm(&mut self) {
+        if self.req_tx.is_none() && self.usable() {
+            self.start();
         }
     }
 
@@ -200,6 +215,15 @@ async fn run_sidecar(
                     Ok(Ok(Some(line))) => {
                         match serde_json::from_str::<Response>(&line) {
                             Ok(resp) => {
+                                if resp.ready {
+                                    tracing::info!("plotly sidecar ready");
+                                    continue;
+                                }
+                                if resp.id == 0 && in_flight.is_empty() && let Some(e) = resp.error {
+                                    // Startup failure: nothing will ever render.
+                                    let _ = tx.send(AppEvent::PlotlyFatal(e));
+                                    break;
+                                }
                                 let Some(hash) = in_flight.remove(&resp.id) else { continue };
                                 let result = match (resp.png_base64, resp.error) {
                                     (Some(b64), _) => base64::Engine::decode(

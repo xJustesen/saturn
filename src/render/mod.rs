@@ -59,6 +59,20 @@ pub fn hash_bytes(b: &[u8]) -> u64 {
     u64::from_le_bytes(h.as_bytes()[..8].try_into().unwrap())
 }
 
+/// Hash a JSON value as its serialization, without building the string
+/// (plotly figures can run to megabytes and are hashed every frame while
+/// they render).
+pub fn hash_json(v: &serde_json::Value) -> u64 {
+    let mut h = blake3::Hasher::new();
+    hash_json_into(&mut h, v);
+    u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
+}
+
+fn hash_json_into(h: &mut blake3::Hasher, v: &serde_json::Value) {
+    // Writing into the hasher cannot fail.
+    let _ = serde_json::to_writer(h, v);
+}
+
 impl RenderCache {
     pub fn invalidate_cell(&mut self, id: &CellId) {
         self.outputs.retain(|(cid, _), _| cid != id);
@@ -174,12 +188,8 @@ pub fn output_key(o: &Output, expanded: bool) -> u64 {
                     | MediaType::Gif(s) => {
                         h.update(s.as_bytes());
                     }
-                    MediaType::Json(v) | MediaType::Plotly(v) => {
-                        h.update(v.to_string().as_bytes());
-                    }
-                    MediaType::Other((_, v)) => {
-                        h.update(v.to_string().as_bytes());
-                    }
+                    MediaType::Json(v) | MediaType::Plotly(v) => hash_json_into(&mut h, v),
+                    MediaType::Other((_, v)) => hash_json_into(&mut h, v),
                     _ => {}
                 }
             }
@@ -334,7 +344,7 @@ fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
             }
         }
         MediaType::Plotly(fig) => {
-            let fig_hash = hash_bytes(fig.to_string().as_bytes());
+            let fig_hash = hash_json(fig);
             let fs = ctx.images.font_size();
             let (hash, px_w, px_h) = if popout {
                 let px_w = u32::from(width) * u32::from(fs.width.max(1));
