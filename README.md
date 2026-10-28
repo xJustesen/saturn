@@ -101,8 +101,10 @@ On macOS the same `~/.config/saturn/` directory is used (`$XDG_CONFIG_HOME` is h
 
 `theme` names a built-in theme, a file in `~/.config/saturn/themes/<name>.toml`, a
 path to a `.toml` file, or (syntax colors only) one of syntect's bundled themes.
-`saturn theme list` prints everything the config accepts; the command palette's
-“Select theme…” switches for the current session.
+`saturn theme list` prints everything the config accepts. In saturn, `Ctrl+P` →
+“Select theme…” opens a picker with live preview: the theme follows the cursor,
+`Enter` keeps it for the session (the status bar shows the config line to make it
+permanent), `Esc` reverts to the previous one.
 
 Built in: `tokyo-night`, `tokyo-night-storm`, `monokai`, `catppuccin-mocha`, `dracula`,
 `gruvbox-dark`, `nord`, `one-dark`, `solarized-dark`, `solarized-light`, `github-dark`

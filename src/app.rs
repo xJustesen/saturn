@@ -74,6 +74,8 @@ pub struct App {
     pub kernelspecs: Option<Vec<KernelspecDir>>,
     pub cfg: Config,
     pub theme: Theme,
+    /// Theme in use before the theme picker opened; restored if the picker is cancelled.
+    theme_before_pick: Option<Theme>,
     pub pending: Vec<Key>,
     pub clipboard: Vec<Cell>,
     pub flash: Option<Flash>,
@@ -127,6 +129,7 @@ impl App {
             show_hidden: cfg.show_hidden,
             cfg,
             theme,
+            theme_before_pick: None,
             pending: Vec::new(),
             clipboard: Vec::new(),
             flash: None,
@@ -531,10 +534,22 @@ impl App {
                 _ => {}
             },
             Overlay::Palette(p) => match p.handle_key(key) {
-                PaletteAction::None => {}
-                PaletteAction::Close => self.overlay = None,
+                PaletteAction::None => {
+                    if p.kind == PaletteKind::Themes {
+                        self.preview_selected_theme();
+                    }
+                }
+                PaletteAction::Close => {
+                    self.overlay = None;
+                    if let Some(t) = self.theme_before_pick.take()
+                        && t.name != self.theme.name
+                    {
+                        self.apply_theme(t);
+                    }
+                }
                 PaletteAction::Accept(data) => {
                     self.overlay = None;
+                    self.theme_before_pick = None;
                     self.on_palette_accept(data);
                 }
                 PaletteAction::Parent => {
@@ -1374,8 +1389,11 @@ impl App {
         self.overlay = Some(Overlay::Palette(PaletteState::new(PaletteKind::Kernels, title, items)));
     }
 
+    /// Theme picker with live preview: the theme follows the cursor, `Esc`
+    /// restores the one in use before, `Enter` keeps the selection.
     fn open_theme_picker(&mut self) {
         let current = self.theme.name.clone();
+        self.theme_before_pick = Some(self.theme.clone());
         let items = crate::theme::available()
             .into_iter()
             .map(|(name, src)| PaletteItem {
@@ -1384,17 +1402,38 @@ impl App {
                 label: name,
             })
             .collect();
-        self.overlay = Some(Overlay::Palette(PaletteState::new(PaletteKind::Themes, "Select theme", items)));
+        let mut p = PaletteState::new(PaletteKind::Themes, "Select theme ⋅ ↑↓ preview, Enter keep, Esc revert", items);
+        if let Some(i) = p.items.iter().position(|it| it.label == current) {
+            p.selected = i;
+        }
+        self.overlay = Some(Overlay::Palette(p));
+    }
+
+    /// Apply the theme under the picker's cursor without closing it.
+    fn preview_selected_theme(&mut self) {
+        let Some(Overlay::Palette(p)) = &self.overlay else { return };
+        let Some(PaletteItem { data: ItemData::Theme(name), .. }) = p.selected_item() else { return };
+        if *name == self.theme.name {
+            return;
+        }
+        match Theme::load(name) {
+            Ok(t) => self.apply_theme(t),
+            Err(e) => tracing::warn!("theme preview {name}: {e:#}"),
+        }
+    }
+
+    fn apply_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.cache.invalidate_all();
+        self.layout.invalidate_all();
+        self.dirty_ui = true;
     }
 
     /// Switch themes for this session (the config file is left alone).
     fn set_theme(&mut self, name: &str) {
         match Theme::load(name) {
             Ok(t) => {
-                self.theme = t;
-                self.cache.invalidate_all();
-                self.layout.invalidate_all();
-                self.dirty_ui = true;
+                self.apply_theme(t);
                 self.flash(format!("theme {name} (set theme = {name:?} in config.toml to keep it)"));
             }
             Err(e) => self.flash_err(format!("theme {name}: {e:#}")),
