@@ -1,0 +1,62 @@
+# Catppuccin Mocha
+name = "Catppuccin Mocha"
+
+[ui]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+muted = "#6c7086"
+line_numbers = "#45475a"
+selection = "#45475a"
+cursor_line = "#313244"
+focus = "#89b4fa"
+edit = "#a6e3a1"
+error = "#f38ba8"
+warning = "#f9e2af"
+info = "#89dceb"
+success = "#a6e3a1"
+status_bg = "#181825"
+status_fg = "#cdd6f4"
+border = "#89b4fa"
+float_bg = "#181825"
+match_bg = "#45475a"
+mode_visual = "#cba6f7"
+mode_search = "#fab387"
+
+[syntax]
+comment = { fg = "#6c7086", italic = true }
+keyword = "#cba6f7"
+"keyword.operator" = "#cba6f7"
+operator = "#89dceb"
+string = "#a6e3a1"
+"string.escape" = "#f5c2e7"
+"string.regexp" = "#fab387"
+number = "#fab387"
+boolean = "#fab387"
+constant = "#fab387"
+"constant.builtin" = "#fab387"
+variable = "#cdd6f4"
+"variable.builtin" = "#f38ba8"
+parameter = { fg = "#eba0ac", italic = true }
+property = "#b4befe"
+function = "#89b4fa"
+"function.call" = "#89b4fa"
+"function.builtin" = "#fab387"
+method = "#89b4fa"
+constructor = "#94e2d5"
+type = "#f9e2af"
+"type.builtin" = "#f9e2af"
+module = { fg = "#b4befe", italic = true }
+decorator = "#fab387"
+punctuation = "#9399b2"
+"punctuation.bracket" = "#9399b2"
+"punctuation.special" = "#f5c2e7"
+tag = "#cba6f7"
+attribute = "#f9e2af"
+"markup.heading" = { fg = "#89b4fa", bold = true }
+"markup.strong" = { bold = true }
+"markup.emphasis" = { italic = true }
+"markup.raw" = "#a6e3a1"
+"markup.link" = { fg = "#74c7ec", underline = true }
+"markup.list" = "#cba6f7"
+"markup.quote" = "#6c7086"
+invalid = "#f38ba8"

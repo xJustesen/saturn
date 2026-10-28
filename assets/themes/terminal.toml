@@ -1,0 +1,44 @@
+# The terminal's own 16 colors; no background is painted.
+name = "Terminal"
+
+[ui]
+foreground = "none"
+muted = "dark gray"
+focus = "blue"
+edit = "green"
+error = "red"
+warning = "yellow"
+info = "cyan"
+success = "green"
+border = "blue"
+mode_fg = "black"
+mode_visual = "magenta"
+mode_search = "cyan"
+
+[syntax]
+comment = { fg = "dark gray", italic = true }
+keyword = "magenta"
+"keyword.operator" = "magenta"
+string = "green"
+"string.escape" = "cyan"
+number = "yellow"
+boolean = "yellow"
+constant = "yellow"
+"constant.builtin" = "yellow"
+"variable.builtin" = "light red"
+function = "blue"
+"function.call" = "blue"
+"function.builtin" = "cyan"
+constructor = "cyan"
+type = "cyan"
+"type.builtin" = "cyan"
+decorator = "light magenta"
+tag = "magenta"
+attribute = "cyan"
+"markup.heading" = { fg = "blue", bold = true }
+"markup.strong" = { bold = true }
+"markup.emphasis" = { italic = true }
+"markup.raw" = "green"
+"markup.link" = { fg = "cyan", underline = true }
+"markup.list" = "magenta"
+invalid = "red"

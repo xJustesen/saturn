@@ -1,0 +1,20 @@
+# Solarized Light: the dark palette on a light background
+name = "Solarized Light"
+extends = "solarized-dark"
+
+[ui]
+background = "#fdf6e3"
+foreground = "#657b83"
+muted = "#93a1a1"
+line_numbers = "#93a1a1"
+selection = "#eee8d5"
+cursor_line = "#eee8d5"
+status_bg = "#eee8d5"
+status_fg = "#586e75"
+border = "#93a1a1"
+float_bg = "#eee8d5"
+match_bg = "#eee8d5"
+
+[syntax]
+comment = { fg = "#93a1a1", italic = true }
+attribute = "#586e75"

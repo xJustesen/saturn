@@ -8,11 +8,12 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::commands::Command;
+use crate::theme::Theme;
 use crate::ui::popout::PopoutState;
 
 pub enum Overlay {
@@ -58,6 +59,7 @@ pub struct ConfirmState {
 pub enum ItemData {
     Command(Command),
     Kernel(usize),
+    Theme(String),
     Dir(PathBuf),
     File(PathBuf),
     NewNotebook(PathBuf),
@@ -74,6 +76,7 @@ pub struct PaletteItem {
 pub enum PaletteKind {
     Commands,
     Kernels,
+    Themes,
     Files(PathBuf),
 }
 
@@ -204,34 +207,38 @@ fn centered(area: Rect, width_pct: u16, max_height: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-pub fn render(buf: &mut Buffer, area: Rect, overlay: &mut Overlay) {
+pub fn render(buf: &mut Buffer, area: Rect, overlay: &mut Overlay, theme: &Theme) {
     match overlay {
-        Overlay::Palette(p) => render_palette(buf, area, p),
-        Overlay::Prompt(p) => render_prompt(buf, area, p),
-        Overlay::Confirm(c) => render_confirm(buf, area, c),
-        Overlay::Help => render_help(buf, area),
+        Overlay::Palette(p) => render_palette(buf, area, p, theme),
+        Overlay::Prompt(p) => render_prompt(buf, area, p, theme),
+        Overlay::Confirm(c) => render_confirm(buf, area, c, theme),
+        Overlay::Help => render_help(buf, area, theme),
         Overlay::Popout(_) => {}
     }
 }
 
-fn render_palette(buf: &mut Buffer, area: Rect, p: &PaletteState) {
+fn float_block(theme: &Theme, border: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(theme.float())
+        .border_style(Style::default().fg(border))
+}
+
+fn render_palette(buf: &mut Buffer, area: Rect, p: &PaletteState, theme: &Theme) {
     let list_h = p.filtered.len().clamp(1, 18) as u16;
     let rect = centered(area, 70, list_h + 4);
     Clear.render(rect, buf);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Blue))
-        .title(format!(" {} ", p.title));
+    let block = float_block(theme, theme.ui.border).title(format!(" {} ", p.title));
     let inner = block.inner(rect);
     block.render(rect, buf);
     if inner.height == 0 {
         return;
     }
     let query_line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Blue)),
+        Span::styled("> ", Style::default().fg(theme.ui.focus)),
         Span::raw(p.query.clone()),
-        Span::styled("▏", Style::default().fg(Color::Gray)),
+        Span::styled("▏", theme.muted()),
     ]);
     buf.set_line(inner.x, inner.y, &query_line, inner.width);
     let list = Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1));
@@ -244,51 +251,38 @@ fn render_palette(buf: &mut Buffer, area: Rect, p: &PaletteState) {
         let item = &p.items[idx];
         let y = list.y + (row - start) as u16;
         let selected = row == p.selected;
-        let st = if selected {
-            Style::default().bg(Color::Rgb(50, 60, 90)).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
+        let st = if selected { theme.selected_row() } else { Style::default() };
         buf.set_style(Rect::new(list.x, y, list.width, 1), st);
         let marker = if selected { "▶ " } else { "  " };
         let label = format!("{marker}{}", item.label);
         let detail_w = (item.detail.chars().count() as u16).min(list.width / 2);
-        let label_w = list.width.saturating_sub(detail_w + 1);
         buf.set_string(list.x, y, &label, st);
         if detail_w > 0 {
             let detail_x = list.x + list.width - detail_w;
-            buf.set_string(detail_x, y, &item.detail, st.fg(Color::DarkGray));
+            let detail_st = if selected && theme.ui.match_fg.is_some() { st } else { st.fg(theme.ui.muted) };
+            buf.set_string(detail_x, y, &item.detail, detail_st);
         }
-        let _ = label_w;
     }
     if p.filtered.is_empty() {
-        buf.set_string(list.x + 2, list.y, "no matches", Style::default().fg(Color::DarkGray));
+        buf.set_string(list.x + 2, list.y, "no matches", theme.muted());
     }
 }
 
-fn render_prompt(buf: &mut Buffer, area: Rect, p: &PromptState) {
+fn render_prompt(buf: &mut Buffer, area: Rect, p: &PromptState, theme: &Theme) {
     let rect = centered(area, 60, 3);
     Clear.render(rect, buf);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(format!(" {} ", p.title));
+    let block = float_block(theme, theme.ui.warning).title(format!(" {} ", p.title));
     let inner = block.inner(rect);
     block.render(rect, buf);
     let shown = if p.password { "•".repeat(p.value.chars().count()) } else { p.value.clone() };
-    let line = Line::from(vec![Span::raw(shown), Span::styled("▏", Style::default().fg(Color::Gray))]);
+    let line = Line::from(vec![Span::raw(shown), Span::styled("▏", theme.muted())]);
     buf.set_line(inner.x, inner.y, &line, inner.width);
 }
 
-fn render_confirm(buf: &mut Buffer, area: Rect, c: &ConfirmState) {
+fn render_confirm(buf: &mut Buffer, area: Rect, c: &ConfirmState, theme: &Theme) {
     let rect = centered(area, 60, 5);
     Clear.render(rect, buf);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(" confirm ");
+    let block = float_block(theme, theme.ui.warning).title(" confirm ");
     let inner = block.inner(rect);
     block.render(rect, buf);
     Paragraph::new(c.message.clone()).wrap(Wrap { trim: false }).render(inner, buf);
@@ -316,15 +310,11 @@ NOTEBOOK (command mode)            CELL EDITING
   ?              this help            q        quit
 ";
 
-fn render_help(buf: &mut Buffer, area: Rect) {
+fn render_help(buf: &mut Buffer, area: Rect, theme: &Theme) {
     let lines = HELP.lines().count() as u16 + 2;
     let rect = centered(area, 86, lines);
     Clear.render(rect, buf);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Blue))
-        .title(" saturn — keys (Esc to close) ");
+    let block = float_block(theme, theme.ui.border).title(" saturn — keys (Esc to close) ");
     let inner = block.inner(rect);
     block.render(rect, buf);
     Paragraph::new(HELP).render(inner, buf);

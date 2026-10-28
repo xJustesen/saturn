@@ -14,6 +14,7 @@ use crate::notebook::{Cell, CellKind, ExecState};
 use crate::render::image::{ImageState, ImageStore};
 use crate::render::plotly::PlotlySidecar;
 use crate::render::{OutputCtx, RenderCache, Rendered};
+use crate::theme::{Theme, decode_color};
 use crate::ui::layout::CellLayout;
 use crate::ui::text::expand_tabs;
 
@@ -27,6 +28,7 @@ pub fn content_width(width: u16) -> u16 {
 
 pub struct CellCtx<'a> {
     pub cfg: &'a Config,
+    pub theme: &'a Theme,
     pub cache: &'a mut RenderCache,
     pub images: &'a mut ImageStore,
     pub plotly: &'a mut PlotlySidecar,
@@ -72,6 +74,7 @@ pub fn measure(cell: &mut Cell, editing: bool, width: u16, ctx: &mut CellCtx) ->
         } else {
             let mut octx = OutputCtx {
                 cfg: ctx.cfg,
+                theme: ctx.theme,
                 images: ctx.images,
                 plotly: ctx.plotly,
                 expanded: cell.outputs_expanded,
@@ -85,25 +88,22 @@ pub fn measure(cell: &mut Cell, editing: bool, width: u16, ctx: &mut CellCtx) ->
     CellLayout { source_rows, outputs, collapsed_rows, total }
 }
 
-fn gutter_label(cell: &Cell) -> (String, Style) {
+fn gutter_label(cell: &Cell, theme: &Theme) -> (String, Style) {
+    let muted = theme.muted();
     match cell.kind {
         CellKind::Code => match cell.exec {
-            ExecState::Running => ("[*]:".to_string(), Style::default().fg(Color::Yellow)),
-            ExecState::Queued => ("[·]:".to_string(), Style::default().fg(Color::DarkGray)),
+            ExecState::Running => ("[*]:".to_string(), Style::default().fg(theme.ui.warning)),
+            ExecState::Queued => ("[·]:".to_string(), muted),
             _ => match cell.execution_count {
                 Some(n) => (
                     format!("[{n}]:"),
-                    if cell.exec == ExecState::Error {
-                        Style::default().fg(Color::Red)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
+                    if cell.exec == ExecState::Error { theme.error() } else { muted },
                 ),
-                None => ("[ ]:".to_string(), Style::default().fg(Color::DarkGray)),
+                None => ("[ ]:".to_string(), muted),
             },
         },
         CellKind::Markdown => (String::new(), Style::default()),
-        CellKind::Raw => ("raw".to_string(), Style::default().fg(Color::DarkGray)),
+        CellKind::Raw => ("raw".to_string(), muted),
     }
 }
 
@@ -126,31 +126,25 @@ pub fn render(
     let bar_x = area.x + GUTTER_W;
     let cx = area.x + GUTTER_W + BAR_W;
 
+    let theme = ctx.theme;
     // Code and raw sources get a full-row tint so an input reads as a block
     // and its output, drawn on the plain background, visibly hangs off it.
+    // It is painted after the source (see below) because highlighted spans
+    // carry the theme background.
     let tint = match cell.kind {
-        CellKind::Code | CellKind::Raw => ctx.cfg.input_bg(),
+        CellKind::Code | CellKind::Raw => theme.ui.input_bg,
         CellKind::Markdown => None,
     };
     let src_rows = layout.source_rows as i32;
-    if let Some(bg) = tint {
-        for r in 0..src_rows {
-            let y = top + r;
-            if y < 0 || y >= height {
-                continue;
-            }
-            buf.set_style(Rect::new(area.x, area.y + y as u16, area.width, 1), Style::default().bg(bg));
-        }
-    }
 
     // The bar traces the focused cell (source and outputs). Without a tint
     // there is nothing else to mark unfocused inputs, so they keep a dim bar.
     let bar = if focused && editing {
-        Some(("┃", Style::default().fg(Color::Green)))
+        Some(("┃", Style::default().fg(theme.ui.edit)))
     } else if focused {
-        Some(("┃", Style::default().fg(Color::Blue)))
+        Some(("┃", Style::default().fg(theme.ui.focus)))
     } else if tint.is_none() && cell.kind != CellKind::Markdown {
-        Some(("│", Style::default().fg(Color::DarkGray)))
+        Some(("│", theme.muted()))
     } else {
         None
     };
@@ -165,7 +159,7 @@ pub fn render(
         }
     }
     if top >= 0 && top < height {
-        let (label, mut st) = gutter_label(cell);
+        let (label, mut st) = gutter_label(cell, theme);
         if focused {
             st = st.add_modifier(Modifier::BOLD);
         }
@@ -178,23 +172,25 @@ pub fn render(
         (Some(ed), true) => {
             let g = editor_gutter(ed.line_count(), ctx.line_numbers) as u16;
             let mut scratch = Buffer::empty(Rect::new(0, 0, cw, layout.source_rows));
-            let mut base = Style::default();
-            if let Some(bg) = tint {
-                base = base.bg(bg);
-            }
-            let theme = EditorTheme::default()
-                .base(base)
+            let ed_theme = EditorTheme::default()
+                .base(theme.base())
                 .cursor_style(Style::default().add_modifier(Modifier::REVERSED))
-                .selection_style(Style::default().bg(Color::Rgb(80, 80, 30)))
-                .line_numbers_style(Style::default().fg(Color::DarkGray))
+                .selection_style(Style::default().bg(theme.ui.selection))
+                .line_numbers_style(Style::default().fg(theme.ui.line_numbers))
                 .hide_status_line();
             let mut view = EditorView::new(&mut ed.state)
-                .theme(theme)
+                .theme(ed_theme)
                 .wrap(wrap)
                 .tab_width(tab)
                 .line_numbers(if ctx.line_numbers { LineNumbers::Absolute } else { LineNumbers::None });
             let ext = if cell.kind == CellKind::Markdown { "md" } else { ctx.lang_ext };
-            if let Ok(h) = SyntaxHighlighter::new(&ctx.cfg.theme, ext) {
+            if let Some(syntax) = edtui::SYNTAX_SET.find_syntax_by_extension(ext) {
+                let h = SyntaxHighlighter::with_sets(
+                    theme.syntax.clone(),
+                    edtui::THEME_SET.clone(),
+                    syntax.clone(),
+                    edtui::SYNTAX_SET.clone(),
+                );
                 view = view.syntax_highlighter(Some(h));
             }
             let _ = g;
@@ -208,6 +204,9 @@ pub fn render(
                 for x in 0..cw {
                     if let (Some(src), Some(dst)) = (scratch.cell((x, sy)), buf.cell_mut((cx + x, y))) {
                         *dst = src.clone();
+                        // edtui emits syntect colors as RGB; terminal colors
+                        // travel through as markers (see theme::decode_rgb).
+                        dst.set_fg(decode_color(dst.fg));
                     }
                 }
             }
@@ -216,21 +215,18 @@ pub fn render(
             let lines: Vec<Line<'static>> = match cell.kind {
                 CellKind::Markdown => {
                     if cell.source.trim().is_empty() {
-                        vec![Line::from(Span::styled(
-                            "(empty markdown cell)",
-                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                        ))]
+                        vec![Line::from(Span::styled("(empty markdown cell)", theme.placeholder()))]
                     } else {
                         ctx.cache.markdown(&cell.id, &cell.source, cw, tab).lines.clone()
                     }
                 }
                 CellKind::Code => ctx
                     .cache
-                    .code(&cell.id, &cell.source, cw, ctx.lang_ext, &ctx.cfg.theme, tab, wrap)
+                    .code(&cell.id, &cell.source, cw, ctx.lang_ext, theme, tab, wrap)
                     .lines
                     .clone(),
                 CellKind::Raw => crate::ui::text::wrap_text(
-                    crate::ui::text::plain(&expand_tabs(&cell.source, tab), Style::default().fg(Color::Gray)),
+                    crate::ui::text::plain(&expand_tabs(&cell.source, tab), theme.muted()),
                     cw as usize,
                     tab,
                     wrap,
@@ -247,6 +243,27 @@ pub fn render(
         }
     }
 
+    // Tint the source rows edge to edge. Cells that still carry the plain
+    // background (or none) take the tint; selection, cursor-line and other
+    // deliberate backgrounds stay.
+    if let Some(bg) = tint {
+        let plain = theme.ui.background.unwrap_or(Color::Reset);
+        for r in 0..src_rows {
+            let y = top + r;
+            if y < 0 || y >= height {
+                continue;
+            }
+            let y = area.y + y as u16;
+            for x in area.x..area.x + area.width {
+                if let Some(c) = buf.cell_mut((x, y)) {
+                    if c.bg == Color::Reset || c.bg == plain {
+                        c.set_bg(bg);
+                    }
+                }
+            }
+        }
+    }
+
     // outputs
     if cell.kind != CellKind::Code || cell.outputs.is_empty() {
         return;
@@ -255,11 +272,11 @@ pub fn render(
     if cell.outputs_collapsed {
         if y0 >= 0 && y0 < height {
             let msg = format!("▸ {} output(s) hidden (o to show)", cell.outputs.len());
-            buf.set_string(cx, area.y + y0 as u16, msg, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+            buf.set_string(cx, area.y + y0 as u16, msg, theme.placeholder());
         }
         return;
     }
-    let mut octx = OutputCtx { cfg: ctx.cfg, images: ctx.images, plotly: ctx.plotly, expanded: cell.outputs_expanded };
+    let mut octx = OutputCtx { cfg: ctx.cfg, theme, images: ctx.images, plotly: ctx.plotly, expanded: cell.outputs_expanded };
     for (i, o) in cell.outputs.iter().enumerate() {
         let rows = layout.outputs.get(i).copied().unwrap_or(1) as i32;
         if y0 >= height {
@@ -290,12 +307,12 @@ pub fn render(
                     }
                     Some(ImageState::Failed(e)) => {
                         if y0 >= 0 {
-                            buf.set_string(cx, area.y + y0 as u16, format!("[image: {e}]"), Style::default().fg(Color::Red));
+                            buf.set_string(cx, area.y + y0 as u16, format!("[image: {e}]"), theme.error());
                         }
                     }
                     _ => {
                         if y0 >= 0 {
-                            buf.set_string(cx, area.y + y0 as u16, "[image: decoding…]", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+                            buf.set_string(cx, area.y + y0 as u16, "[image: decoding…]", theme.placeholder());
                         }
                     }
                 },

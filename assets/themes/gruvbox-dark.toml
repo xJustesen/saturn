@@ -1,0 +1,56 @@
+# Gruvbox dark (medium)
+name = "Gruvbox Dark"
+
+[ui]
+background = "#282828"
+foreground = "#ebdbb2"
+muted = "#928374"
+line_numbers = "#7c6f64"
+selection = "#504945"
+cursor_line = "#3c3836"
+focus = "#83a598"
+edit = "#b8bb26"
+error = "#fb4934"
+warning = "#fabd2f"
+info = "#83a598"
+success = "#b8bb26"
+status_bg = "#1d2021"
+status_fg = "#ebdbb2"
+border = "#928374"
+float_bg = "#1d2021"
+match_bg = "#504945"
+mode_visual = "#d3869b"
+mode_search = "#fe8019"
+
+[syntax]
+comment = { fg = "#928374", italic = true }
+keyword = "#fb4934"
+"keyword.import" = "#8ec07c"
+operator = "#ebdbb2"
+string = "#b8bb26"
+"string.escape" = "#fe8019"
+"string.regexp" = "#fe8019"
+number = "#d3869b"
+boolean = "#d3869b"
+constant = "#d3869b"
+"constant.builtin" = "#d3869b"
+"variable.builtin" = "#83a598"
+parameter = "#83a598"
+function = { fg = "#b8bb26", bold = true }
+"function.call" = "#b8bb26"
+"function.builtin" = "#fe8019"
+constructor = "#b8bb26"
+type = "#fabd2f"
+"type.builtin" = "#fabd2f"
+module = "#83a598"
+decorator = "#8ec07c"
+tag = "#8ec07c"
+attribute = "#8ec07c"
+"markup.heading" = { fg = "#b8bb26", bold = true }
+"markup.strong" = { bold = true }
+"markup.emphasis" = { italic = true }
+"markup.raw" = "#8ec07c"
+"markup.link" = { fg = "#83a598", underline = true }
+"markup.list" = "#fe8019"
+"markup.quote" = "#928374"
+invalid = "#fb4934"

@@ -1,0 +1,56 @@
+# Solarized Dark
+name = "Solarized Dark"
+
+[ui]
+background = "#002b36"
+foreground = "#839496"
+muted = "#586e75"
+line_numbers = "#586e75"
+selection = "#073642"
+cursor_line = "#073642"
+focus = "#268bd2"
+edit = "#859900"
+error = "#dc322f"
+warning = "#b58900"
+info = "#2aa198"
+success = "#859900"
+status_bg = "#073642"
+status_fg = "#93a1a1"
+border = "#586e75"
+float_bg = "#073642"
+match_bg = "#073642"
+mode_visual = "#d33682"
+mode_search = "#cb4b16"
+
+[syntax]
+comment = { fg = "#586e75", italic = true }
+keyword = "#859900"
+"keyword.import" = "#cb4b16"
+operator = "#859900"
+string = "#2aa198"
+"string.escape" = "#cb4b16"
+"string.regexp" = "#2aa198"
+number = "#d33682"
+boolean = "#b58900"
+constant = "#b58900"
+"constant.builtin" = "#b58900"
+"variable.builtin" = "#268bd2"
+property = "#268bd2"
+function = "#268bd2"
+"function.call" = "#268bd2"
+"function.builtin" = "#268bd2"
+constructor = "#b58900"
+type = "#b58900"
+"type.builtin" = "#b58900"
+module = "#b58900"
+decorator = "#cb4b16"
+tag = "#268bd2"
+attribute = "#93a1a1"
+"markup.heading" = { fg = "#cb4b16", bold = true }
+"markup.strong" = { bold = true }
+"markup.emphasis" = { italic = true }
+"markup.raw" = "#2aa198"
+"markup.link" = { fg = "#268bd2", underline = true }
+"markup.list" = "#cb4b16"
+"markup.quote" = "#586e75"
+invalid = "#dc322f"

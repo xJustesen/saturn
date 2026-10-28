@@ -1,0 +1,12 @@
+# Tokyo Night (storm): lighter background than tokyo-night
+name = "Tokyo Night Storm"
+extends = "tokyo-night"
+
+[ui]
+background = "#24283b"
+line_numbers = "#3b4261"
+selection = "#2e3c64"
+cursor_line = "#2f3549"
+status_bg = "#1f2335"
+float_bg = "#1f2335"
+match_bg = "#2e3c64"
