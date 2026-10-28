@@ -1,0 +1,56 @@
+# One Dark (Atom)
+name = "One Dark"
+
+[ui]
+background = "#282c34"
+foreground = "#abb2bf"
+muted = "#5c6370"
+line_numbers = "#4b5263"
+selection = "#3e4452"
+cursor_line = "#2c313c"
+focus = "#61afef"
+edit = "#98c379"
+error = "#e06c75"
+warning = "#e5c07b"
+info = "#56b6c2"
+success = "#98c379"
+status_bg = "#21252b"
+status_fg = "#abb2bf"
+border = "#3e4452"
+float_bg = "#21252b"
+match_bg = "#3e4452"
+mode_visual = "#c678dd"
+mode_search = "#d19a66"
+
+[syntax]
+comment = { fg = "#5c6370", italic = true }
+keyword = "#c678dd"
+operator = "#56b6c2"
+string = "#98c379"
+"string.escape" = "#56b6c2"
+"string.regexp" = "#98c379"
+number = "#d19a66"
+boolean = "#d19a66"
+constant = "#d19a66"
+"constant.builtin" = "#d19a66"
+variable = "#e06c75"
+"variable.builtin" = "#e5c07b"
+property = "#e06c75"
+function = "#61afef"
+"function.call" = "#61afef"
+"function.builtin" = "#56b6c2"
+constructor = "#e5c07b"
+type = "#e5c07b"
+"type.builtin" = "#e5c07b"
+module = "#e5c07b"
+decorator = "#e5c07b"
+tag = "#e06c75"
+attribute = "#d19a66"
+"markup.heading" = { fg = "#e06c75", bold = true }
+"markup.strong" = { bold = true }
+"markup.emphasis" = { italic = true }
+"markup.raw" = "#98c379"
+"markup.link" = { fg = "#61afef", underline = true }
+"markup.list" = "#e06c75"
+"markup.quote" = "#5c6370"
+invalid = "#e06c75"

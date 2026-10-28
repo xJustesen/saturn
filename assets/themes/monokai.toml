@@ -1,0 +1,54 @@
+# Monokai (classic Sublime palette)
+name = "Monokai"
+
+[ui]
+background = "#272822"
+foreground = "#f8f8f2"
+muted = "#75715e"
+line_numbers = "#90908a"
+selection = "#49483e"
+cursor_line = "#3e3d32"
+focus = "#66d9ef"
+edit = "#a6e22e"
+error = "#f92672"
+warning = "#e6db74"
+info = "#66d9ef"
+success = "#a6e22e"
+status_bg = "#1e1f1c"
+status_fg = "#f8f8f2"
+border = "#66d9ef"
+float_bg = "#1e1f1c"
+match_bg = "#49483e"
+mode_visual = "#ae81ff"
+mode_search = "#fd971f"
+
+[syntax]
+comment = "#75715e"
+keyword = "#f92672"
+"keyword.function" = { fg = "#66d9ef", italic = true }
+operator = "#f92672"
+string = "#e6db74"
+"string.escape" = "#ae81ff"
+"string.regexp" = "#e6db74"
+number = "#ae81ff"
+boolean = "#ae81ff"
+constant = "#ae81ff"
+"constant.builtin" = "#ae81ff"
+"variable.builtin" = { fg = "#fd971f", italic = true }
+parameter = { fg = "#fd971f", italic = true }
+function = "#a6e22e"
+"function.builtin" = "#66d9ef"
+constructor = "#a6e22e"
+type = "#a6e22e"
+"type.builtin" = { fg = "#66d9ef", italic = true }
+decorator = "#a6e22e"
+tag = "#f92672"
+attribute = "#a6e22e"
+"markup.heading" = { fg = "#a6e22e", bold = true }
+"markup.strong" = { bold = true }
+"markup.emphasis" = { italic = true }
+"markup.raw" = "#e6db74"
+"markup.link" = { fg = "#66d9ef", underline = true }
+"markup.list" = "#f92672"
+"markup.quote" = "#75715e"
+invalid = "#f92672"

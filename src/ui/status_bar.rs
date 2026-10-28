@@ -5,7 +5,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
 use crate::kernel::KernelStatus;
@@ -13,16 +12,19 @@ use crate::kernel::KernelStatus;
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
-    buf.set_style(area, Style::default().bg(Color::Rgb(30, 30, 40)));
+    let t = &app.theme;
+    let ui = &t.ui;
+    buf.set_style(area, Style::default().bg(ui.status_bg).fg(ui.status_fg));
+    let mode = |label: &'static str, bg: Color| (label, Style::default().bg(bg).fg(ui.mode_fg).add_modifier(Modifier::BOLD));
     let (mode_label, mode_style) = match app.mode {
-        Mode::Command => (" COMMAND ", Style::default().bg(Color::Blue).fg(Color::Black).add_modifier(Modifier::BOLD)),
+        Mode::Command => mode(" COMMAND ", ui.mode_command),
         Mode::Edit => {
             let m = app.nb.cells.get(app.focused).and_then(|c| c.editor.as_ref()).map(|e| e.mode());
             match m {
-                Some(EditorMode::Insert) => (" INSERT ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                Some(EditorMode::Visual) => (" VISUAL ", Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                Some(EditorMode::Search) => (" SEARCH ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                _ => (" NORMAL ", Style::default().bg(Color::LightGreen).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                Some(EditorMode::Insert) => mode(" INSERT ", ui.mode_insert),
+                Some(EditorMode::Visual) => mode(" VISUAL ", ui.mode_visual),
+                Some(EditorMode::Search) => mode(" SEARCH ", ui.mode_search),
+                _ => mode(" NORMAL ", ui.mode_normal),
             }
         }
     };
@@ -30,17 +32,14 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     let title = app.nb.title();
     left.push(Span::styled(title, Style::default().add_modifier(Modifier::BOLD)));
     if app.nb.dirty {
-        left.push(Span::styled(" [+]", Style::default().fg(Color::Yellow)));
+        left.push(Span::styled(" [+]", Style::default().fg(ui.warning)));
     }
-    left.push(Span::styled(
-        format!("  cell {}/{}", app.focused + 1, app.nb.cells.len()),
-        Style::default().fg(Color::Gray),
-    ));
+    left.push(Span::styled(format!("  cell {}/{}", app.focused + 1, app.nb.cells.len()), t.muted()));
     if !app.pending.is_empty() {
-        left.push(Span::styled(format!("  {}", crate::keymap::describe(&app.pending)), Style::default().fg(Color::Yellow)));
+        left.push(Span::styled(format!("  {}", crate::keymap::describe(&app.pending)), Style::default().fg(ui.warning)));
     }
     if let Some(f) = &app.flash {
-        let st = if f.error { Style::default().fg(Color::LightRed) } else { Style::default().fg(Color::LightCyan) };
+        let st = if f.error { t.error() } else { Style::default().fg(ui.info) };
         left.push(Span::raw("  "));
         left.push(Span::styled(f.text.clone(), st));
     }
@@ -49,19 +48,19 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     match &app.kernel {
         Some(k) => {
             let (icon, st) = match k.status {
-                KernelStatus::Idle => ("●", Style::default().fg(Color::Green)),
-                KernelStatus::Busy => (SPINNER[app.spinner % SPINNER.len()], Style::default().fg(Color::Yellow)),
-                KernelStatus::Starting | KernelStatus::Restarting => (SPINNER[app.spinner % SPINNER.len()], Style::default().fg(Color::Cyan)),
-                KernelStatus::Dead => ("✖", Style::default().fg(Color::Red)),
+                KernelStatus::Idle => ("●", Style::default().fg(ui.success)),
+                KernelStatus::Busy => (SPINNER[app.spinner % SPINNER.len()], Style::default().fg(ui.warning)),
+                KernelStatus::Starting | KernelStatus::Restarting => (SPINNER[app.spinner % SPINNER.len()], Style::default().fg(ui.info)),
+                KernelStatus::Dead => ("✖", t.error()),
             };
-            right.push(Span::styled(k.display_name().to_string(), Style::default().fg(Color::Gray)));
+            right.push(Span::styled(k.display_name().to_string(), Style::default()));
             right.push(Span::raw(" "));
             right.push(Span::styled(icon, st));
-            right.push(Span::styled(format!(" {}", k.status.label()), Style::default().fg(Color::Gray)));
+            right.push(Span::styled(format!(" {}", k.status.label()), Style::default()));
         }
-        None => right.push(Span::styled("no kernel (K to select)", Style::default().fg(Color::DarkGray))),
+        None => right.push(Span::styled("no kernel (K to select)", t.muted())),
     }
-    right.push(Span::styled(format!("  {} ", app.graphics_label), Style::default().fg(Color::DarkGray)));
+    right.push(Span::styled(format!("  {} ", app.graphics_label), t.muted()));
 
     let left_line = Line::from(left);
     let right_line = Line::from(right);
@@ -70,5 +69,4 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     if rw < area.width {
         buf.set_line(area.x + area.width - rw, area.y, &right_line, rw);
     }
-    let _ = UnicodeWidthStr::width("");
 }

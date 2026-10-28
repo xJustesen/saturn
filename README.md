@@ -88,12 +88,87 @@ max_image_rows_halfblocks = 12 # same when only halfblocks are available
 stream_max_lines = 500         # longer outputs are truncated until expanded with `o`
 persist_plotly_png = true      # store sidecar PNGs in the notebook so they survive
 plotly_scale = 2.0             # pixel scale for plotly renders
-theme = "base16-ocean.dark"    # syntect theme for code
+theme = "tokyo-night"          # see Themes below
 line_numbers = false
 tab_width = 4
 wrap = true
 show_hidden = false            # file browser
 ```
+
+On macOS the same `~/.config/saturn/` directory is used (`$XDG_CONFIG_HOME` is honoured).
+
+## Themes
+
+`theme` names a built-in theme, a file in `~/.config/saturn/themes/<name>.toml`, a
+path to a `.toml` file, or (syntax colors only) one of syntect's bundled themes.
+`saturn theme list` prints everything the config accepts; the command palette's
+“Select theme…” switches for the current session.
+
+Built in: `tokyo-night`, `tokyo-night-storm`, `monokai`, `catppuccin-mocha`, `dracula`,
+`gruvbox-dark`, `nord`, `one-dark`, `solarized-dark`, `solarized-light`, `github-dark`
+and `terminal` (your terminal's 16 colors, no background painted).
+
+### Adopting your Neovim colorscheme
+
+```bash
+saturn theme import-nvim                      # the colorscheme your init.lua sets
+saturn theme import-nvim --colorscheme nord   # any installed one; --name picks the file name
+```
+
+This runs `nvim --headless` with your own config, reads the resolved highlight
+groups (treesitter captures such as `@keyword.import` first, legacy groups like
+`Keyword` as fallback) and writes `~/.config/saturn/themes/<colorscheme>.toml`.
+Put `theme = "<colorscheme>"` in the config to use it. The file is a normal theme
+file, so tweak it freely; re-run with `--force` to regenerate.
+
+### Writing a theme
+
+A theme file has three optional tables. `extends = "name"` inherits every key of
+another theme first (built-in or user), so a tweak can be a few lines:
+
+```toml
+name = "My Tokyo"
+extends = "tokyo-night"
+
+[ui]
+background = "none"            # keep the terminal's background
+focus = "#ff9e64"
+
+[syntax]
+comment = { fg = "#565f89", italic = true }
+"keyword.import" = "#7dcfff"   # keys with dots must be quoted
+
+[scopes]                       # raw syntect scope selectors, for anything else
+"meta.function-call.arguments" = "#c0caf5"
+```
+
+Colors are `#rrggbb`, `#rgb`, an ANSI name (`red`, `light blue`, `dark gray`),
+a 0–255 index, or `none` (terminal default). A style is either a color or a table
+with `fg`, `bg`, `bold`, `italic`, `underline`.
+
+`[ui]` keys: `background`, `foreground`, `muted` (hints, raw cells), `line_numbers`,
+`selection`, `cursor_line`, `focus` (focused cell bar, borders), `edit` (bar while
+editing), `error`, `warning`, `info`, `success`, `status_bg`, `status_fg`, `border`,
+`float_bg`, `match_bg`, `match_fg` (picker selection), `mode_fg`, `mode_command`,
+`mode_normal`, `mode_insert`, `mode_visual`, `mode_search`. Unset keys fall back
+to sensible relatives (`border` → `focus`, `mode_insert` → `edit`, …).
+
+`[syntax]` keys (named like treesitter captures): `comment`, `comment.doc`, `keyword`,
+`keyword.control`, `keyword.import`, `keyword.return`, `keyword.exception`,
+`keyword.function`, `keyword.operator`, `operator`, `string`, `string.escape`,
+`string.regexp`, `number`, `boolean`, `constant`, `constant.builtin`, `variable`,
+`variable.builtin`, `parameter`, `property`, `function`, `function.call`,
+`function.builtin`, `method`, `constructor`, `type`, `type.builtin`, `module`,
+`decorator`, `punctuation`, `punctuation.bracket`, `punctuation.special`, `tag`,
+`attribute`, `markup.heading`, `markup.strong`, `markup.emphasis`, `markup.raw`,
+`markup.link`, `markup.list`, `markup.quote`, `invalid`. More specific keys win
+over broader ones (`keyword.import` over `keyword`); unset keys inherit the
+foreground. `saturn theme show NAME` prints the resolved colors and the syntect
+selectors each key maps to.
+
+While a cell is being edited, the editor shows the theme's colors but not its
+bold/italic attributes (a limitation of the editor widget); unfocused cells show both.
+Rendered markdown cells keep their own fixed styling.
 
 ## Development
 

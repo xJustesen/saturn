@@ -8,11 +8,12 @@ use std::collections::HashMap;
 
 use ansi_to_tui::IntoText;
 use jupyter_protocol::{Media, MediaType};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 
 use crate::config::Config;
 use crate::notebook::{CellId, Output, StreamName};
+use crate::theme::Theme;
 use crate::ui::text::{expand_tabs, owned_text, plain, wrap_text};
 use image::ImageStore;
 use plotly::PlotlySidecar;
@@ -48,6 +49,7 @@ pub struct RenderCache {
 
 pub struct OutputCtx<'a> {
     pub cfg: &'a Config,
+    pub theme: &'a Theme,
     pub images: &'a mut ImageStore,
     pub plotly: &'a mut PlotlySidecar,
     /// Show the whole stream even if longer than `stream_max_lines`.
@@ -110,13 +112,14 @@ impl RenderCache {
         source: &str,
         width: u16,
         ext: &str,
-        theme: &str,
+        theme: &Theme,
         tab_width: usize,
         wrap: bool,
     ) -> &Text<'static> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(source.as_bytes());
         hasher.update(ext.as_bytes());
+        hasher.update(theme.name.as_bytes());
         hasher.update(&[wrap as u8]);
         let key = u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap());
         let stale = match self.code.get(id) {
@@ -124,7 +127,7 @@ impl RenderCache {
             None => true,
         };
         if stale {
-            let text = crate::ui::text::highlight(source, ext, theme, tab_width);
+            let text = crate::ui::text::highlight(source, ext, &theme.syntax, tab_width);
             let text = wrap_text(text, width as usize, tab_width, wrap);
             self.code.insert(id.clone(), (key, width, text));
         }
@@ -198,9 +201,9 @@ pub fn output_key(o: &Output, expanded: bool) -> u64 {
     u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
 }
 
-fn placeholder(msg: impl Into<String>) -> Rendered {
+fn placeholder(msg: impl Into<String>, theme: &Theme) -> Rendered {
     let mut t = Text::from(Line::from(msg.into()));
-    t.style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+    t.style = theme.placeholder();
     Rendered::Placeholder(t)
 }
 
@@ -211,14 +214,15 @@ fn ansi_text(s: &str) -> Text<'static> {
     }
 }
 
-fn truncate_stream(mut text: Text<'static>, max: usize, expanded: bool) -> Text<'static> {
-    if expanded || text.lines.len() <= max {
+fn truncate_stream(mut text: Text<'static>, ctx: &OutputCtx) -> Text<'static> {
+    let max = ctx.cfg.stream_max_lines;
+    if ctx.expanded || text.lines.len() <= max {
         return text;
     }
     let hidden = text.lines.len() - max;
     text.lines.truncate(max);
     let mut l = Line::from(format!("… {hidden} more lines (press o to expand)"));
-    l.style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+    l.style = ctx.theme.placeholder();
     text.lines.push(l);
     text
 }
@@ -277,9 +281,9 @@ pub fn render_output_in(o: &Output, bx: Box, ctx: &mut OutputCtx) -> Rendered {
         Output::Stream { name, text } => {
             let mut t = ansi_text(&expand_tabs(text.trim_end_matches('\n'), tab));
             if *name == StreamName::Stderr {
-                t.style = Style::default().fg(Color::LightRed);
+                t.style = ctx.theme.error();
             }
-            let t = truncate_stream(t, ctx.cfg.stream_max_lines, ctx.expanded);
+            let t = truncate_stream(t, ctx);
             Rendered::Text(wrap_text(t, w, tab, wrap))
         }
         Output::Error { ename, evalue, traceback } => {
@@ -289,7 +293,7 @@ pub fn render_output_in(o: &Output, bx: Box, ctx: &mut OutputCtx) -> Rendered {
                 traceback.join("\n")
             };
             let t = ansi_text(&expand_tabs(&raw, tab));
-            let t = truncate_stream(t, ctx.cfg.stream_max_lines, ctx.expanded);
+            let t = truncate_stream(t, ctx);
             Rendered::Text(wrap_text(t, w, tab, wrap))
         }
         Output::DisplayData { data, .. } | Output::ExecuteResult { data, .. } => render_media(data, bx, ctx),
@@ -313,7 +317,7 @@ fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
     // Figures are sized to the box the protocol can actually draw.
     let (width, max_rows) = ctx.images.clamp_box(width, max_rows);
     let Some(mut m) = richest(data) else {
-        return placeholder("[no displayable output]");
+        return placeholder("[no displayable output]", ctx.theme);
     };
     // In the popout a plotly figure is re-rendered at the popout's own pixel
     // size, which beats any (small) PNG that came with it.
@@ -340,7 +344,7 @@ fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
             let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cleaned.as_bytes()).ok();
             match bytes.and_then(|b| store_image(ctx.images, hash, b)) {
                 Some((hash, cols, rows)) => Rendered::Image { hash, cols, rows },
-                None => placeholder("[image: cannot decode]"),
+                None => placeholder("[image: cannot decode]", ctx.theme),
             }
         }
         MediaType::Plotly(fig) => {
@@ -360,19 +364,19 @@ fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
                     let img_hash = hash_bytes(&png);
                     match store_image(ctx.images, img_hash, png.to_vec()) {
                         Some((hash, cols, rows)) => Rendered::Image { hash, cols, rows },
-                        None => placeholder("[plotly: bad png from sidecar]"),
+                        None => placeholder("[plotly: bad png from sidecar]", ctx.theme),
                     }
                 }
-                plotly::PlotlyState::Pending => placeholder("[plotly figure: rendering…]"),
+                plotly::PlotlyState::Pending => placeholder("[plotly figure: rendering…]", ctx.theme),
                 plotly::PlotlyState::Failed(e) => {
-                    placeholder(format!("[plotly figure: {e} — press o to open in browser]"))
+                    placeholder(format!("[plotly figure: {e} — press o to open in browser]"), ctx.theme)
                 }
             }
         }
         MediaType::Markdown(s) => Rendered::Text(render_markdown(s, width, tab)),
         MediaType::Plain(s) => {
             let t = ansi_text(&expand_tabs(s.trim_end_matches('\n'), tab));
-            let t = truncate_stream(t, ctx.cfg.stream_max_lines, ctx.expanded);
+            let t = truncate_stream(t, ctx);
             Rendered::Text(wrap_text(t, w, tab, wrap))
         }
         MediaType::Html(s) => {
@@ -380,22 +384,22 @@ fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
                 Some(p) => expand_tabs(p.trim_end_matches('\n'), tab),
                 None => html::to_text(s),
             };
-            let t = truncate_stream(plain(&text, Style::default()), ctx.cfg.stream_max_lines, ctx.expanded);
+            let t = truncate_stream(plain(&text, Style::default()), ctx);
             Rendered::Text(wrap_text(t, w, tab, wrap))
         }
         MediaType::Latex(s) => Rendered::Text(wrap_text(plain(s, Style::default()), w, tab, wrap)),
         MediaType::Json(v) => {
             let s = serde_json::to_string_pretty(v).unwrap_or_default();
-            let t = truncate_stream(plain(&s, Style::default()), ctx.cfg.stream_max_lines, ctx.expanded);
+            let t = truncate_stream(plain(&s, Style::default()), ctx);
             Rendered::Text(wrap_text(t, w, tab, wrap))
         }
         MediaType::Svg(_) => match plain_alt(data) {
             Some(p) => Rendered::Text(wrap_text(plain(p, Style::default()), w, tab, wrap)),
-            None => placeholder("[svg image]"),
+            None => placeholder("[svg image]", ctx.theme),
         },
         other => match plain_alt(data) {
             Some(p) => Rendered::Text(wrap_text(plain(p, Style::default()), w, tab, wrap)),
-            None => placeholder(format!("[{}]", other.mime_type())),
+            None => placeholder(format!("[{}]", other.mime_type()), ctx.theme),
         },
     }
 }

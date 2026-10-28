@@ -15,7 +15,8 @@ pub struct Config {
     pub persist_plotly_png: bool,
     /// Pixel scale factor for plotly renders.
     pub plotly_scale: f64,
-    /// Syntect theme name used for code cells.
+    /// Theme name: a built-in (`tokyo-night`, `monokai`, …), a file in
+    /// `~/.config/saturn/themes/`, a path, or a syntect theme name.
     pub theme: String,
     /// Show line numbers inside the focused cell editor.
     pub line_numbers: bool,
@@ -35,7 +36,7 @@ impl Default for Config {
             stream_max_lines: 500,
             persist_plotly_png: true,
             plotly_scale: 2.0,
-            theme: "base16-ocean.dark".to_string(),
+            theme: "tokyo-night".to_string(),
             line_numbers: false,
             tab_width: 4,
             wrap: true,
@@ -44,9 +45,29 @@ impl Default for Config {
     }
 }
 
+/// `$XDG_CONFIG_HOME/saturn`, else `~/.config/saturn` (on macOS too), else the
+/// platform config directory.
+pub fn config_root() -> Option<std::path::PathBuf> {
+    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(x).join("saturn"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        return Some(home.join(".config").join("saturn"));
+    }
+    dirs::config_dir().map(|d| d.join("saturn"))
+}
+
 impl Config {
     pub fn path() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|d| d.join("saturn").join("config.toml"))
+        let p = config_root()?.join("config.toml");
+        if p.exists() {
+            return Some(p);
+        }
+        // Earlier versions read the platform directory (~/Library/Application Support on macOS).
+        match dirs::config_dir().map(|d| d.join("saturn").join("config.toml")) {
+            Some(legacy) if legacy.exists() => Some(legacy),
+            _ => Some(p),
+        }
     }
 
     pub fn load() -> Self {

@@ -4,7 +4,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
@@ -14,6 +14,7 @@ use crate::notebook::{Cell, CellId, Output};
 use crate::render::image::{ImageState, ImageStore};
 use crate::render::plotly::PlotlySidecar;
 use crate::render::{self, Box as RenderBox, OutputCtx, Rendered};
+use crate::theme::Theme;
 
 /// Space around the modal.
 const MARGIN_X: u16 = 2;
@@ -140,6 +141,7 @@ fn output_label(o: &Output, plotly_ok: bool) -> String {
 
 pub struct PopoutCtx<'a> {
     pub cfg: &'a Config,
+    pub theme: &'a Theme,
     pub images: &'a mut ImageStore,
     pub plotly: &'a mut PlotlySidecar,
 }
@@ -166,12 +168,14 @@ pub fn render(buf: &mut Buffer, area: Rect, p: &mut PopoutState, cell: Option<&C
         _ => (format!(" cell {} · no outputs ", p.cell + 1), None),
     };
     let hint = " j/k scroll  h/l pan  w wrap  Tab next output  Esc close ";
+    let theme = ctx.theme;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Blue))
+        .style(theme.float())
+        .border_style(theme.border())
         .title(Line::from(Span::styled(title, Style::default().add_modifier(Modifier::BOLD))))
-        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))).right_aligned());
+        .title_bottom(Line::from(Span::styled(hint, theme.muted())).right_aligned());
     let inner = block.inner(rect);
     block.render(rect, buf);
     if inner.width == 0 || inner.height == 0 {
@@ -181,7 +185,7 @@ pub fn render(buf: &mut Buffer, area: Rect, p: &mut PopoutState, cell: Option<&C
     p.view_cols = inner.width as usize;
     let Some(o) = body else {
         p.content_rows = 0;
-        buf.set_string(inner.x, inner.y, "(no outputs)", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+        buf.set_string(inner.x, inner.y, "(no outputs)", theme.placeholder());
         return;
     };
 
@@ -197,7 +201,7 @@ pub fn render(buf: &mut Buffer, area: Rect, p: &mut PopoutState, cell: Option<&C
     if stale {
         let mut cfg = ctx.cfg.clone();
         cfg.wrap = p.wrap;
-        let mut octx = OutputCtx { cfg: &cfg, images: ctx.images, plotly: ctx.plotly, expanded: true };
+        let mut octx = OutputCtx { cfg: &cfg, theme, images: ctx.images, plotly: ctx.plotly, expanded: true };
         let bx = RenderBox { width: inner.width, max_rows: inner.height, popout: true };
         let rendered = render::render_output_in(o, bx, &mut octx);
         if let Rendered::Image { hash, .. } = &rendered
@@ -228,8 +232,8 @@ pub fn render(buf: &mut Buffer, area: Rect, p: &mut PopoutState, cell: Option<&C
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
                     .end_symbol(None)
-                    .thumb_style(Style::default().fg(Color::Gray))
-                    .track_style(Style::default().fg(Color::DarkGray))
+                    .thumb_style(Style::default().fg(theme.ui.foreground))
+                    .track_style(theme.muted())
                     .render(inner, buf, &mut st);
             }
         }
@@ -246,15 +250,10 @@ pub fn render(buf: &mut Buffer, area: Rect, p: &mut PopoutState, cell: Option<&C
                     SlicedImage::new(proto, pos).render(inner, buf);
                 }
                 Some(ImageState::Failed(e)) => {
-                    buf.set_string(inner.x, inner.y, format!("[image: {e}]"), Style::default().fg(Color::Red));
+                    buf.set_string(inner.x, inner.y, format!("[image: {e}]"), theme.error());
                 }
                 _ => {
-                    buf.set_string(
-                        inner.x,
-                        inner.y,
-                        "[image: decoding…]",
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                    );
+                    buf.set_string(inner.x, inner.y, "[image: decoding…]", theme.placeholder());
                 }
             }
         }

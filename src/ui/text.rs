@@ -2,12 +2,13 @@
 //! editor, and syntect highlighting for unfocused code cells.
 
 use edtui::syntect::easy::HighlightLines;
-use edtui::syntect::highlighting::{FontStyle, Style as SynStyle};
-use ratatui::style::{Color, Modifier, Style};
+use edtui::syntect::highlighting::{FontStyle, Style as SynStyle, Theme as SynTheme};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthChar;
 
 use crate::editor::char_width;
+use crate::theme::from_syn;
 
 pub fn owned_text(t: Text<'_>) -> Text<'static> {
     let style = t.style;
@@ -104,7 +105,10 @@ pub fn wrap_text(text: Text<'static>, max_width: usize, tab_width: usize, wrap: 
 }
 
 fn syn_to_style(s: SynStyle) -> Style {
-    let mut st = Style::default().fg(Color::Rgb(s.foreground.r, s.foreground.g, s.foreground.b));
+    let mut st = Style::default().fg(from_syn(s.foreground));
+    if s.background.a != 0 {
+        st = st.bg(from_syn(s.background));
+    }
     if s.font_style.contains(FontStyle::BOLD) {
         st = st.add_modifier(Modifier::BOLD);
     }
@@ -118,13 +122,10 @@ fn syn_to_style(s: SynStyle) -> Style {
 }
 
 /// Syntax-highlight `source` into owned lines (no wrapping).
-pub fn highlight(source: &str, ext: &str, theme: &str, tab_width: usize) -> Text<'static> {
+pub fn highlight(source: &str, ext: &str, theme: &SynTheme, tab_width: usize) -> Text<'static> {
     let source = expand_tabs(source, tab_width);
     let ss = &*edtui::SYNTAX_SET;
-    let ts = &*edtui::THEME_SET;
-    let syntax = ss.find_syntax_by_extension(ext);
-    let theme = ts.themes.get(theme).or_else(|| ts.themes.values().next());
-    let (Some(syntax), Some(theme)) = (syntax, theme) else {
+    let Some(syntax) = ss.find_syntax_by_extension(ext) else {
         return Text::from(source.split('\n').map(|l| Line::from(l.to_string())).collect::<Vec<_>>());
     };
     let mut h = HighlightLines::new(syntax, theme);

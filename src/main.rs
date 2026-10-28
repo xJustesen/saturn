@@ -25,12 +25,51 @@ const USAGE: &str = "\
 saturn — keyboard-first TUI Jupyter notebook
 
 usage: saturn [PATH] [--kernel NAME] [--log FILE]
+       saturn theme list | show NAME | import-nvim [--colorscheme NAME] [--name NAME] [--force]
 
   PATH            notebook (.ipynb) to open, or a directory to browse (default: cwd)
   --kernel NAME   kernelspec name to start (overrides the notebook's metadata)
   --log FILE      log file (default: $XDG_CACHE_HOME/saturn/saturn.log)
   -h, --help      show this help
+
+  theme list          themes that `theme = \"…\"` in config.toml accepts
+  theme show NAME     print a theme's resolved colors
+  theme import-nvim   write ~/.config/saturn/themes/<colorscheme>.toml from your
+                      Neovim colorscheme (runs `nvim --headless` with your config)
 ";
+
+fn theme_cli(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            for (name, src) in saturn::theme::available() {
+                println!("{name:<28} {}", src.label());
+            }
+        }
+        Some("show") => {
+            let name = args.get(1).context("theme show needs a NAME")?;
+            print!("{}", saturn::theme::describe(name)?);
+        }
+        Some("import-nvim") => {
+            let mut colorscheme = None;
+            let mut name = None;
+            let mut force = false;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--colorscheme" | "-c" => colorscheme = Some(it.next().context("--colorscheme needs a value")?.clone()),
+                    "--name" | "-n" => name = Some(it.next().context("--name needs a value")?.clone()),
+                    "--force" | "-f" => force = true,
+                    s => bail!("unknown option {s}\n{USAGE}"),
+                }
+            }
+            let path = saturn::theme::import_nvim(colorscheme.as_deref(), name.as_deref(), force)?;
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            println!("wrote {}\nuse it with  theme = {stem:?}  in config.toml, or pick it with “Select theme…” (Ctrl+P)", path.display());
+        }
+        _ => bail!("usage: saturn theme list | show NAME | import-nvim [--colorscheme NAME] [--name NAME] [--force]"),
+    }
+    Ok(())
+}
 
 static KBD_ENHANCED: AtomicBool = AtomicBool::new(false);
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
@@ -101,6 +140,10 @@ pub fn restore_terminal() {
 }
 
 fn main() -> Result<()> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("theme") {
+        return theme_cli(&argv[1..]);
+    }
     let opts = parse_args()?;
     if !io::stdout().is_terminal() {
         bail!("saturn needs an interactive terminal");

@@ -49,6 +49,7 @@ pub enum Command {
     RestartAndRunAll,
     ShutdownKernel,
     SelectKernel,
+    SelectTheme,
     // files
     Save,
     SaveAs,
@@ -111,6 +112,7 @@ pub const PALETTE: &[CommandInfo] = &[
     CommandInfo { cmd: Command::Reload, name: "Reload notebook from disk", keys: "" },
     CommandInfo { cmd: Command::ToggleLineNumbers, name: "Toggle line numbers", keys: "" },
     CommandInfo { cmd: Command::ToggleWrap, name: "Toggle line wrap", keys: "" },
+    CommandInfo { cmd: Command::SelectTheme, name: "Select theme…", keys: "" },
     CommandInfo { cmd: Command::Help, name: "Show help", keys: "?" },
     CommandInfo { cmd: Command::ShowLogPath, name: "Show log file path", keys: "" },
     CommandInfo { cmd: Command::Quit, name: "Quit", keys: "q" },

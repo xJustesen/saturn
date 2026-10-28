@@ -18,6 +18,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::Opts;
 use crate::commands::{Command, PALETTE};
 use crate::config::Config;
+use crate::theme::Theme;
 use crate::editor::{CellEditor, language_extension};
 use crate::kernel::{KernelCommand, KernelEvent, KernelHandle, KernelStatus, ReplyStatus, startup};
 use crate::keymap::{self, Key, KeyAction};
@@ -72,6 +73,7 @@ pub struct App {
     pub kernel: Option<KernelHandle>,
     pub kernelspecs: Option<Vec<KernelspecDir>>,
     pub cfg: Config,
+    pub theme: Theme,
     pub pending: Vec<Key>,
     pub clipboard: Vec<Cell>,
     pub flash: Option<Flash>,
@@ -103,6 +105,13 @@ impl App {
         };
         let images = ImageStore::new(picker, tx.clone());
         let plotly = PlotlySidecar::new(tx.clone(), cfg.plotly_scale);
+        let theme = match Theme::load(&cfg.theme) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("theme {:?}: {e:#}; using terminal colors", cfg.theme);
+                Theme::default()
+            }
+        };
         let mut app = App {
             nb: Notebook::empty(),
             mode: Mode::Command,
@@ -117,6 +126,7 @@ impl App {
             line_numbers: cfg.line_numbers,
             show_hidden: cfg.show_hidden,
             cfg,
+            theme,
             pending: Vec::new(),
             clipboard: Vec::new(),
             flash: None,
@@ -334,8 +344,8 @@ impl App {
         let n = self.nb.cells.len();
         let editing = self.mode == Mode::Edit;
         let focused = self.focused;
-        let App { nb, layout, cache, images, plotly, cfg, lang_ext, line_numbers, .. } = self;
-        let mut ctx = ui::cell::CellCtx { cfg, cache, images, plotly, lang_ext, line_numbers: *line_numbers };
+        let App { nb, layout, cache, images, plotly, cfg, theme, lang_ext, line_numbers, .. } = self;
+        let mut ctx = ui::cell::CellCtx { cfg, theme, cache, images, plotly, lang_ext, line_numbers: *line_numbers };
         layout.ensure(n, |i| ui::cell::measure(&mut nb.cells[i], editing && i == focused, width, &mut ctx));
     }
 
@@ -761,6 +771,7 @@ impl App {
                 }
             }
             Command::SelectKernel => self.open_kernel_picker(),
+            Command::SelectTheme => self.open_theme_picker(),
             Command::Save => self.save(),
             Command::SaveAs => {
                 let current = self.nb.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
@@ -1363,6 +1374,33 @@ impl App {
         self.overlay = Some(Overlay::Palette(PaletteState::new(PaletteKind::Kernels, title, items)));
     }
 
+    fn open_theme_picker(&mut self) {
+        let current = self.theme.name.clone();
+        let items = crate::theme::available()
+            .into_iter()
+            .map(|(name, src)| PaletteItem {
+                detail: format!("{}{}", src.label(), if name == current { " · current" } else { "" }),
+                data: ItemData::Theme(name.clone()),
+                label: name,
+            })
+            .collect();
+        self.overlay = Some(Overlay::Palette(PaletteState::new(PaletteKind::Themes, "Select theme", items)));
+    }
+
+    /// Switch themes for this session (the config file is left alone).
+    fn set_theme(&mut self, name: &str) {
+        match Theme::load(name) {
+            Ok(t) => {
+                self.theme = t;
+                self.cache.invalidate_all();
+                self.layout.invalidate_all();
+                self.dirty_ui = true;
+                self.flash(format!("theme {name} (set theme = {name:?} in config.toml to keep it)"));
+            }
+            Err(e) => self.flash_err(format!("theme {name}: {e:#}")),
+        }
+    }
+
     fn open_command_palette(&mut self) {
         let items = PALETTE
             .iter()
@@ -1414,6 +1452,7 @@ impl App {
     fn on_palette_accept(&mut self, data: ItemData) {
         match data {
             ItemData::Command(cmd) => self.dispatch(cmd),
+            ItemData::Theme(name) => self.set_theme(&name),
             ItemData::Kernel(i) => {
                 let spec = self.kernelspecs.as_ref().and_then(|s| s.get(i)).cloned();
                 if let Some(spec) = spec {

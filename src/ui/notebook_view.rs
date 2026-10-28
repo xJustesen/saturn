@@ -2,7 +2,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
 use crate::app::{App, Mode};
@@ -24,8 +24,8 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
     let total_rows = app.layout.total_rows();
     let scroll_row = app.scroll_row;
     let focused = app.focused;
-    let App { nb, layout, cache, images, plotly, cfg, lang_ext, line_numbers, .. } = app;
-    let mut ctx = CellCtx { cfg, cache, images, plotly, lang_ext, line_numbers: *line_numbers };
+    let App { nb, layout, cache, images, plotly, cfg, theme, lang_ext, line_numbers, .. } = app;
+    let mut ctx = CellCtx { cfg, theme, cache, images, plotly, lang_ext, line_numbers: *line_numbers };
     for i in first..n {
         let Some(l) = layout.layout(i) else { break };
         if top >= area.height as i64 {
@@ -43,7 +43,7 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(None)
-            .thumb_style(Style::default().fg(Color::DarkGray))
+            .thumb_style(Style::default().fg(ctx.theme.ui.muted))
             .render(area, buf, &mut state);
     }
 }

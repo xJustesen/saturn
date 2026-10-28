@@ -19,19 +19,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     app.view = main;
     let buf = frame.buffer_mut();
+    buf.set_style(area, app.theme.base());
     // The popout covers the notebook; not drawing it underneath keeps inline
     // graphics (sixel/iTerm2 draw outside the cell grid) from bleeding through.
     if matches!(app.overlay, Some(Overlay::Popout(_))) {
         status_bar::render(buf, status, app);
-        let App { nb, images, plotly, cfg, overlay, .. } = app;
+        let App { nb, images, plotly, cfg, theme, overlay, .. } = app;
         let Some(Overlay::Popout(p)) = overlay else { return };
         let cell = nb.cells.get(p.cell).filter(|c| c.id == p.cell_id);
-        popout::render(buf, main, p, cell, popout::PopoutCtx { cfg, images, plotly });
+        popout::render(buf, main, p, cell, popout::PopoutCtx { cfg, theme, images, plotly });
         return;
     }
     notebook_view::render(buf, main, app);
     status_bar::render(buf, status, app);
     if let Some(ov) = &mut app.overlay {
-        overlay::render(buf, area, ov);
+        overlay::render(buf, area, ov, &app.theme);
     }
 }

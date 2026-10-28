@@ -1,0 +1,54 @@
+# Dracula
+name = "Dracula"
+
+[ui]
+background = "#282a36"
+foreground = "#f8f8f2"
+muted = "#6272a4"
+line_numbers = "#6272a4"
+selection = "#44475a"
+cursor_line = "#353747"
+focus = "#bd93f9"
+edit = "#50fa7b"
+error = "#ff5555"
+warning = "#ffb86c"
+info = "#8be9fd"
+success = "#50fa7b"
+status_bg = "#21222c"
+status_fg = "#f8f8f2"
+border = "#bd93f9"
+float_bg = "#21222c"
+match_bg = "#44475a"
+mode_visual = "#ff79c6"
+mode_search = "#f1fa8c"
+
+[syntax]
+comment = "#6272a4"
+keyword = "#ff79c6"
+operator = "#ff79c6"
+string = "#f1fa8c"
+"string.escape" = "#ff79c6"
+"string.regexp" = "#f1fa8c"
+number = "#bd93f9"
+boolean = "#bd93f9"
+constant = "#bd93f9"
+"constant.builtin" = "#bd93f9"
+"variable.builtin" = { fg = "#bd93f9", italic = true }
+parameter = { fg = "#ffb86c", italic = true }
+function = "#50fa7b"
+"function.call" = "#50fa7b"
+"function.builtin" = "#8be9fd"
+constructor = "#50fa7b"
+type = { fg = "#8be9fd", italic = true }
+"type.builtin" = { fg = "#8be9fd", italic = true }
+decorator = "#50fa7b"
+tag = "#ff79c6"
+attribute = { fg = "#50fa7b", italic = true }
+"markup.heading" = { fg = "#bd93f9", bold = true }
+"markup.strong" = { bold = true }
+"markup.emphasis" = { italic = true }
+"markup.raw" = "#50fa7b"
+"markup.link" = { fg = "#8be9fd", underline = true }
+"markup.list" = "#ff79c6"
+"markup.quote" = "#6272a4"
+invalid = "#ff5555"
