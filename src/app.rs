@@ -1429,12 +1429,20 @@ impl App {
         self.dirty_ui = true;
     }
 
-    /// Switch themes for this session (the config file is left alone).
+    /// Switch themes and remember the choice in config.toml, so the next
+    /// launch starts with it.
     fn set_theme(&mut self, name: &str) {
         match Theme::load(name) {
             Ok(t) => {
                 self.apply_theme(t);
-                self.flash(format!("theme {name} (set theme = {name:?} in config.toml to keep it)"));
+                self.cfg.theme = name.to_string();
+                match self.cfg.save_theme() {
+                    Ok(path) => {
+                        let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.flash(format!("theme {name} · saved to {file}"));
+                    }
+                    Err(e) => self.flash_err(format!("theme {name} applied but not saved: {e:#}")),
+                }
             }
             Err(e) => self.flash_err(format!("theme {name}: {e:#}")),
         }

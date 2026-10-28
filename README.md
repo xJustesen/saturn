@@ -106,8 +106,9 @@ On macOS the same `~/.config/saturn/` directory is used (`$XDG_CONFIG_HOME` is h
 path to a `.toml` file, or (syntax colors only) one of syntect's bundled themes.
 `saturn theme list` prints everything the config accepts. In saturn, `Ctrl+P` →
 “Select theme…” opens a picker with live preview: the theme follows the cursor,
-`Enter` keeps it for the session (the status bar shows the config line to make it
-permanent), `Esc` reverts to the previous one.
+`Enter` keeps it and writes `theme = "<name>"` to `config.toml` so the next launch
+starts with it (other keys and comments in the file are left as they are), `Esc`
+reverts to the previous one.
 
 Built in: `tokyo-night`, `tokyo-night-storm`, `monokai`, `catppuccin-mocha`, `dracula`,
 `gruvbox-dark`, `nord`, `one-dark`, `solarized-dark`, `solarized-light`, `github-dark`
@@ -123,7 +124,7 @@ saturn theme import-nvim --colorscheme nord   # any installed one; --name picks 
 This runs `nvim --headless` with your own config, reads the resolved highlight
 groups (treesitter captures such as `@keyword.import` first, legacy groups like
 `Keyword` as fallback) and writes `~/.config/saturn/themes/<colorscheme>.toml`.
-Put `theme = "<colorscheme>"` in the config to use it. The file is a normal theme
+Pick it from the theme picker or put `theme = "<colorscheme>"` in the config to use it. The file is a normal theme
 file, so tweak it freely; re-run with `--force` to regenerate.
 
 ### Writing a theme

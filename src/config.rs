@@ -1,5 +1,12 @@
 //! User configuration (`$XDG_CONFIG_HOME/saturn/config.toml`).
+//!
+//! The file is read once at startup. Settings changed from inside saturn
+//! (currently the theme) are written back with [`write_key`], which edits the
+//! one key in place so hand-written comments and other keys survive.
 
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,9 +54,9 @@ impl Default for Config {
 
 /// `$XDG_CONFIG_HOME/saturn`, else `~/.config/saturn` (on macOS too), else the
 /// platform config directory.
-pub fn config_root() -> Option<std::path::PathBuf> {
+pub fn config_root() -> Option<PathBuf> {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return Some(std::path::PathBuf::from(x).join("saturn"));
+        return Some(PathBuf::from(x).join("saturn"));
     }
     if let Some(home) = dirs::home_dir() {
         return Some(home.join(".config").join("saturn"));
@@ -58,7 +65,7 @@ pub fn config_root() -> Option<std::path::PathBuf> {
 }
 
 impl Config {
-    pub fn path() -> Option<std::path::PathBuf> {
+    pub fn path() -> Option<PathBuf> {
         let p = config_root()?.join("config.toml");
         if p.exists() {
             return Some(p);
@@ -84,6 +91,102 @@ impl Config {
             },
             Err(_) => Self::default(),
         }
+    }
+
+    /// Record the current theme in config.toml so the next launch starts with
+    /// it. Returns the file written.
+    pub fn save_theme(&self) -> Result<PathBuf> {
+        let path = Self::path().context("no config directory")?;
+        write_key(&path, "theme", self.theme.as_str())?;
+        Ok(path)
+    }
+}
+
+/// Set one top-level `key = value` in a TOML file, leaving every other line
+/// (comments included) as it was. Creates the file and its directory if needed.
+/// A file that does not parse is left untouched and reported as an error.
+pub fn write_key(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> Result<()> {
+    let mut doc = match std::fs::read_to_string(path) {
+        Ok(s) => s
+            .parse::<toml_edit::DocumentMut>()
+            .with_context(|| format!("{} is not valid TOML", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let mut value: toml_edit::Value = value.into();
+    match doc.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+        // Keep the key where it is, along with its spacing and trailing comment.
+        Some(existing) => {
+            *value.decor_mut() = existing.decor().clone();
+            *existing = value;
+        }
+        None => {
+            doc[key] = toml_edit::Item::Value(value);
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string()).with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("saturn-config-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("sub").join("config.toml")
+    }
+
+    #[test]
+    fn write_key_creates_file_and_directory() {
+        let path = temp_file("create");
+        write_key(&path, "theme", "nord").unwrap();
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(s.trim(), "theme = \"nord\"");
+        let cfg: Config = toml::from_str(&s).unwrap();
+        assert_eq!(cfg.theme, "nord");
+    }
+
+    #[test]
+    fn write_key_keeps_comments_and_other_keys() {
+        let path = temp_file("edit");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = "# my saturn config\nwrap = false  # keep long lines\ntheme = \"monokai\" # see Themes\n\n[unknown]\nx = 1\n";
+        std::fs::write(&path, before).unwrap();
+        write_key(&path, "theme", "dracula").unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            "# my saturn config\nwrap = false  # keep long lines\ntheme = \"dracula\" # see Themes\n\n[unknown]\nx = 1\n"
+        );
+        let cfg: Config = toml::from_str(&after).unwrap();
+        assert_eq!(cfg.theme, "dracula");
+        assert!(!cfg.wrap);
+    }
+
+    #[test]
+    fn write_key_appends_when_missing() {
+        let path = temp_file("append");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "wrap = false\n").unwrap();
+        write_key(&path, "theme", "nord").unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, "wrap = false\ntheme = \"nord\"\n");
+    }
+
+    #[test]
+    fn write_key_refuses_to_clobber_invalid_toml() {
+        let path = temp_file("invalid");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "this is = = not toml\n").unwrap();
+        assert!(write_key(&path, "theme", "nord").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is = = not toml\n");
     }
 }
 
