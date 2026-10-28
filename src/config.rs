@@ -25,6 +25,10 @@ pub struct Config {
     pub wrap: bool,
     /// Fuzzy file browser: show hidden entries.
     pub show_hidden: bool,
+    /// Background tint drawn across the full row of code/raw cell sources
+    /// (`"#rrggbb"`), so inputs stand out from their outputs. Set to `""`
+    /// to disable; unfocused cells then get a dim bar instead.
+    pub input_bg: String,
 }
 
 impl Default for Config {
@@ -40,11 +44,17 @@ impl Default for Config {
             tab_width: 4,
             wrap: true,
             show_hidden: false,
+            input_bg: "#1c1e2a".to_string(),
         }
     }
 }
 
 impl Config {
+    /// The configured input tint as a colour, if any.
+    pub fn input_bg(&self) -> Option<ratatui::style::Color> {
+        parse_hex(&self.input_bg)
+    }
+
     pub fn path() -> Option<std::path::PathBuf> {
         dirs::config_dir().map(|d| d.join("saturn").join("config.toml"))
     }
@@ -63,5 +73,32 @@ impl Config {
             },
             Err(_) => Self::default(),
         }
+    }
+}
+
+fn parse_hex(s: &str) -> Option<ratatui::style::Color> {
+    let h = s.trim().strip_prefix('#')?;
+    if h.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some(ratatui::style::Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn input_bg_parses_hex_or_disables() {
+        let mut c = Config::default();
+        assert_eq!(c.input_bg(), Some(Color::Rgb(0x1c, 0x1e, 0x2a)));
+        c.input_bg = "#FF0080".into();
+        assert_eq!(c.input_bg(), Some(Color::Rgb(255, 0, 128)));
+        c.input_bg = String::new();
+        assert_eq!(c.input_bg(), None);
+        c.input_bg = "red".into();
+        assert_eq!(c.input_bg(), None);
     }
 }

@@ -93,6 +93,7 @@ line_numbers = false
 tab_width = 4
 wrap = true
 show_hidden = false            # file browser
+input_bg = "#1c1e2a"           # full-row tint behind code inputs ("" to disable)
 ```
 
 ## Development

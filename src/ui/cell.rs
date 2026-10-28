@@ -126,24 +126,43 @@ pub fn render(
     let bar_x = area.x + GUTTER_W;
     let cx = area.x + GUTTER_W + BAR_W;
 
-    let bar_style = if focused && editing {
-        Style::default().fg(Color::Green)
-    } else if focused {
-        Style::default().fg(Color::Blue)
-    } else {
-        Style::default().fg(Color::DarkGray)
+    // Code and raw sources get a full-row tint so an input reads as a block
+    // and its output, drawn on the plain background, visibly hangs off it.
+    let tint = match cell.kind {
+        CellKind::Code | CellKind::Raw => ctx.cfg.input_bg(),
+        CellKind::Markdown => None,
     };
-    let bar = if focused { "┃" } else { "│" };
-
-    // gutter + bar for every visible body row
-    for r in 0..body_rows {
-        let y = top + r;
-        if y < 0 || y >= height {
-            continue;
+    let src_rows = layout.source_rows as i32;
+    if let Some(bg) = tint {
+        for r in 0..src_rows {
+            let y = top + r;
+            if y < 0 || y >= height {
+                continue;
+            }
+            buf.set_style(Rect::new(area.x, area.y + y as u16, area.width, 1), Style::default().bg(bg));
         }
-        let y = area.y + y as u16;
-        let st = if r < layout.source_rows as i32 { bar_style } else { bar_style.add_modifier(Modifier::DIM) };
-        buf.set_string(bar_x, y, bar, st);
+    }
+
+    // The bar traces the focused cell (source and outputs). Without a tint
+    // there is nothing else to mark unfocused inputs, so they keep a dim bar.
+    let bar = if focused && editing {
+        Some(("┃", Style::default().fg(Color::Green)))
+    } else if focused {
+        Some(("┃", Style::default().fg(Color::Blue)))
+    } else if tint.is_none() && cell.kind != CellKind::Markdown {
+        Some(("│", Style::default().fg(Color::DarkGray)))
+    } else {
+        None
+    };
+    if let Some((glyph, st)) = bar {
+        for r in 0..body_rows {
+            let y = top + r;
+            if y < 0 || y >= height {
+                continue;
+            }
+            let st = if focused || r < src_rows { st } else { st.add_modifier(Modifier::DIM) };
+            buf.set_string(bar_x, area.y + y as u16, glyph, st);
+        }
     }
     if top >= 0 && top < height {
         let (label, mut st) = gutter_label(cell);
@@ -155,13 +174,16 @@ pub fn render(
     }
 
     // source
-    let src_rows = layout.source_rows as i32;
     match (&mut cell.editor, editing) {
         (Some(ed), true) => {
             let g = editor_gutter(ed.line_count(), ctx.line_numbers) as u16;
             let mut scratch = Buffer::empty(Rect::new(0, 0, cw, layout.source_rows));
+            let mut base = Style::default();
+            if let Some(bg) = tint {
+                base = base.bg(bg);
+            }
             let theme = EditorTheme::default()
-                .base(Style::default())
+                .base(base)
                 .cursor_style(Style::default().add_modifier(Modifier::REVERSED))
                 .selection_style(Style::default().bg(Color::Rgb(80, 80, 30)))
                 .line_numbers_style(Style::default().fg(Color::DarkGray))
