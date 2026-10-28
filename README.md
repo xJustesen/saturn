@@ -13,8 +13,11 @@ A blazingly fast, keyboard-first Jupyter notebook for the terminal.
 ## Install
 
 ```bash
-cargo install --path .
+make install            # release build, installed to ~/.local/bin
+make install PREFIX=/usr/local
 ```
+
+or `cargo install --path .` to put it in `~/.cargo/bin`.
 
 Requires a Rust toolchain. Kernels are discovered from the usual Jupyter data
 directories, from `uv tool` installs (e.g. `uv tool install jupyterlab`) and from
