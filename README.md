@@ -53,7 +53,7 @@ Notebook (command mode):
 | Key | Action | Key | Action |
 |---|---|---|---|
 | `j` / `k`, `↓` / `↑` | focus next / previous cell | `Enter` / `i` | edit cell (vim normal / insert) |
-| `gg` / `G` / `gt` | first / last / go to cell `n` | `Esc` | (in vim normal mode) back to notebook |
+| `gg` / `G` / `gt` | first / last / go to cell (picker) | `Esc` | (in vim normal mode) back to notebook |
 | `Ctrl+D` / `Ctrl+U` | half page down / up | `Shift+Enter` | run and advance |
 | `a` / `b` | insert cell above / below | `Ctrl+Enter` | run |
 | `dd` / `x` / `c` | delete / cut / copy cell | `Alt+Enter` | run and insert below |
@@ -66,6 +66,15 @@ Notebook (command mode):
 | `o` / `O` | toggle (or expand) / clear outputs | `?` | help |
 | `z` | inspect output in a popout | `q` | quit |
 | `/` | search the notebook | `n` / `N` | next / previous match |
+
+`gt` opens a picker that lists every cell on one row: its number, the first line
+of its source, and a glyph plus excerpt for its output (`≡` stream, `▤` result or
+table, `▦` figure with its pixel size, `✗` error with the exception name). Cells
+currently on screen carry a band and the focused cell a bar; a failed cell is drawn
+in the error colour, a running one in the warning colour. Type digits to jump to a
+cell number, letters to fuzzy-filter on source and output text (`gt fig` lists the
+figure cells), `j`/`k` or the arrows to move while nothing is typed, `Enter` to go,
+`Esc` to cancel.
 
 `/` searches every cell's text as it is shown (code, markdown, raw) and jumps to
 the first match while you type, like vim's incremental search. `Enter` keeps the

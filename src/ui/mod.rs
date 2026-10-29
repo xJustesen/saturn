@@ -1,6 +1,7 @@
 //! Drawing: notebook view, status bar and overlays.
 
 pub mod cell;
+pub mod cell_picker;
 pub mod layout;
 pub mod notebook_view;
 pub mod overlay;

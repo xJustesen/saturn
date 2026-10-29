@@ -30,6 +30,7 @@ use crate::render::plotly::PlotlySidecar;
 use crate::search::{self, Match, SearchInput, SearchState};
 use crate::ui;
 use crate::ui::cell::content_width;
+use crate::ui::cell_picker::{CellPickerState, PickerAction};
 use crate::ui::layout::LayoutCache;
 use crate::ui::overlay::{
     ConfirmKind, ConfirmState, ItemData, Overlay, PaletteAction, PaletteItem, PaletteKind,
@@ -261,6 +262,9 @@ impl App {
                 } else if let Some(Overlay::Prompt(p)) = &mut self.overlay {
                     p.value.push_str(text.trim_end_matches(['\n', '\r']));
                 } else if let Some(Overlay::Palette(p)) = &mut self.overlay {
+                    p.query.push_str(text.trim());
+                    p.filter();
+                } else if let Some(Overlay::Cells(p)) = &mut self.overlay {
                     p.query.push_str(text.trim());
                     p.filter();
                 }
@@ -545,6 +549,14 @@ impl App {
                 KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => p.value.push(c),
                 _ => {}
             },
+            Overlay::Cells(p) => match p.handle_key(key) {
+                PickerAction::None => {}
+                PickerAction::Close => self.overlay = None,
+                PickerAction::Go(idx) => {
+                    self.overlay = None;
+                    self.set_focus(idx);
+                }
+            },
             Overlay::Palette(p) => match p.handle_key(key) {
                 PaletteAction::None => {
                     if p.kind == PaletteKind::Themes {
@@ -598,12 +610,7 @@ impl App {
                 if self.mode == Mode::Edit {
                     return;
                 }
-                self.overlay = Some(Overlay::Prompt(PromptState {
-                    title: format!("Go to cell (1-{})", self.nb.cells.len()),
-                    value: String::new(),
-                    password: false,
-                    kind: PromptKind::GoToCell,
-                }));
+                self.open_cell_picker();
             }
             Command::HalfPageDown | Command::HalfPageUp => {
                 self.ensure_layout(self.view.width.max(1));
@@ -948,18 +955,6 @@ impl App {
                 self.nb.path = Some(p);
                 self.nb.dirty = true;
                 self.save();
-            }
-            PromptKind::GoToCell => {
-                let v = value.trim();
-                if v.is_empty() {
-                    return;
-                }
-                let n = self.nb.cells.len();
-                match v.parse::<usize>() {
-                    Ok(k) if (1..=n).contains(&k) => self.set_focus(k - 1),
-                    Ok(_) => self.flash_err(format!("cell {v} out of range (1-{n})")),
-                    Err(_) => self.flash_err(format!("not a cell number: {v}")),
-                }
             }
             PromptKind::NewNotebook { dir } => {
                 let v = value.trim();
@@ -1403,6 +1398,22 @@ impl App {
             }
             None => self.resolve_kernel(),
         }
+    }
+
+    /// `gt`: list every cell with its number, first source line and output
+    /// excerpt; the band marks the cells on screen.
+    fn open_cell_picker(&mut self) {
+        if self.nb.cells.is_empty() {
+            return;
+        }
+        if self.view.width > 0 {
+            self.ensure_layout(self.view.width);
+        }
+        let h = self.view_height();
+        let first = self.layout.cell_at_row(self.scroll_row);
+        let last = self.layout.cell_at_row(self.scroll_row + h.saturating_sub(1));
+        let state = CellPickerState::new(&self.nb.cells, self.cfg.tab_width, self.focused, (first, last));
+        self.overlay = Some(Overlay::Cells(state));
     }
 
     fn open_kernel_picker(&mut self) {

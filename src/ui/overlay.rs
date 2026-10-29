@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wra
 
 use crate::commands::Command;
 use crate::theme::Theme;
+use crate::ui::cell_picker::CellPickerState;
 use crate::ui::popout::PopoutState;
 
 pub enum Overlay {
@@ -21,6 +22,8 @@ pub enum Overlay {
     Prompt(PromptState),
     Confirm(ConfirmState),
     Help,
+    /// `gt`: every cell on one row; drawn by [`crate::ui::cell_picker`].
+    Cells(CellPickerState),
     /// Drawn by [`crate::ui::popout`], not here.
     Popout(PopoutState),
 }
@@ -29,7 +32,6 @@ pub enum Overlay {
 pub enum PromptKind {
     StdinReply,
     SaveAs,
-    GoToCell,
     NewNotebook { dir: PathBuf },
 }
 
@@ -214,6 +216,7 @@ pub fn render(buf: &mut Buffer, area: Rect, overlay: &mut Overlay, theme: &Theme
         Overlay::Prompt(p) => render_prompt(buf, area, p, theme),
         Overlay::Confirm(c) => render_confirm(buf, area, c, theme),
         Overlay::Help => render_help(buf, area, theme),
+        Overlay::Cells(p) => crate::ui::cell_picker::render(buf, area, p, theme),
         Overlay::Popout(_) => {}
     }
 }
@@ -292,7 +295,8 @@ fn render_confirm(buf: &mut Buffer, area: Rect, c: &ConfirmState, theme: &Theme)
 pub const HELP: &str = "\
 NOTEBOOK (command mode)            CELL EDITING
   j / k, ↓ / ↑   focus next/prev     Enter   edit cell (vim normal mode)
-  gg / G / gt    first/last/go to    i       edit cell (insert mode)
+  gg / G         first / last cell    i       edit cell (insert mode)
+  gt             go to cell (picker)
   Ctrl+D / U     half page           Esc     normal → back to notebook
   Ctrl+E / Y     scroll a line       (vim: hjkl, dd, yy, p, ciw, v, /, u …)
   a / b          insert above/below
