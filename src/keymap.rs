@@ -68,6 +68,7 @@ const COMMAND: &[(&[Key], Command)] = &[
     (&[k(KeyCode::Up)], Command::FocusPrev),
     (&[ch('g'), ch('g')], Command::FocusFirst),
     (&[ch('G')], Command::FocusLast),
+    (&[ch('g'), ch('t')], Command::GoToCell),
     (&[k(KeyCode::Home)], Command::FocusFirst),
     (&[k(KeyCode::End)], Command::FocusLast),
     (&[ctrl('d')], Command::HalfPageDown),

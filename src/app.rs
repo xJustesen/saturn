@@ -594,6 +594,17 @@ impl App {
             Command::FocusPrev => self.set_focus(self.focused.saturating_sub(1)),
             Command::FocusFirst => self.set_focus(0),
             Command::FocusLast => self.set_focus(self.nb.cells.len().saturating_sub(1)),
+            Command::GoToCell => {
+                if self.mode == Mode::Edit {
+                    return;
+                }
+                self.overlay = Some(Overlay::Prompt(PromptState {
+                    title: format!("Go to cell (1-{})", self.nb.cells.len()),
+                    value: String::new(),
+                    password: false,
+                    kind: PromptKind::GoToCell,
+                }));
+            }
             Command::HalfPageDown | Command::HalfPageUp => {
                 self.ensure_layout(self.view.width.max(1));
                 let h = self.view_height() / 2;
@@ -937,6 +948,18 @@ impl App {
                 self.nb.path = Some(p);
                 self.nb.dirty = true;
                 self.save();
+            }
+            PromptKind::GoToCell => {
+                let v = value.trim();
+                if v.is_empty() {
+                    return;
+                }
+                let n = self.nb.cells.len();
+                match v.parse::<usize>() {
+                    Ok(k) if (1..=n).contains(&k) => self.set_focus(k - 1),
+                    Ok(_) => self.flash_err(format!("cell {v} out of range (1-{n})")),
+                    Err(_) => self.flash_err(format!("not a cell number: {v}")),
+                }
             }
             PromptKind::NewNotebook { dir } => {
                 let v = value.trim();

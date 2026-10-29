@@ -29,6 +29,7 @@ pub enum Overlay {
 pub enum PromptKind {
     StdinReply,
     SaveAs,
+    GoToCell,
     NewNotebook { dir: PathBuf },
 }
 
@@ -291,7 +292,7 @@ fn render_confirm(buf: &mut Buffer, area: Rect, c: &ConfirmState, theme: &Theme)
 pub const HELP: &str = "\
 NOTEBOOK (command mode)            CELL EDITING
   j / k, ↓ / ↑   focus next/prev     Enter   edit cell (vim normal mode)
-  gg / G         first / last        i       edit cell (insert mode)
+  gg / G / gt    first/last/go to    i       edit cell (insert mode)
   Ctrl+D / U     half page           Esc     normal → back to notebook
   Ctrl+E / Y     scroll a line       (vim: hjkl, dd, yy, p, ciw, v, /, u …)
   a / b          insert above/below

@@ -53,7 +53,7 @@ Notebook (command mode):
 | Key | Action | Key | Action |
 |---|---|---|---|
 | `j` / `k`, `↓` / `↑` | focus next / previous cell | `Enter` / `i` | edit cell (vim normal / insert) |
-| `gg` / `G` | first / last cell | `Esc` | (in vim normal mode) back to notebook |
+| `gg` / `G` / `gt` | first / last / go to cell `n` | `Esc` | (in vim normal mode) back to notebook |
 | `Ctrl+D` / `Ctrl+U` | half page down / up | `Shift+Enter` | run and advance |
 | `a` / `b` | insert cell above / below | `Ctrl+Enter` | run |
 | `dd` / `x` / `c` | delete / cut / copy cell | `Alt+Enter` | run and insert below |
