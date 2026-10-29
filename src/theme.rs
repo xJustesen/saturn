@@ -117,6 +117,9 @@ pub const UI_KEYS: &[&str] = &[
     "float_bg",
     "match_bg",
     "match_fg",
+    "search_bg",
+    "search_fg",
+    "search_current_bg",
     "mode_fg",
     "mode_command",
     "mode_normal",
@@ -321,6 +324,10 @@ pub struct Ui {
     /// The selected row in a picker.
     pub match_bg: Color,
     pub match_fg: Option<Color>,
+    /// Notebook search (`/`): every match, and the one `n`/`N` landed on.
+    pub search_bg: Color,
+    pub search_fg: Option<Color>,
+    pub search_current_bg: Color,
     /// Text color of the mode label in the status bar.
     pub mode_fg: Color,
     pub mode_command: Color,
@@ -354,6 +361,9 @@ impl Ui {
         let edit = get("edit").unwrap_or(Color::Green);
         let success = get("success").unwrap_or(Color::Green);
         let info = get("info").unwrap_or(Color::Cyan);
+        let warning = get("warning").unwrap_or(Color::Yellow);
+        let mode_fg = get("mode_fg").unwrap_or(background.unwrap_or(Color::Black));
+        let mode_search = get("mode_search").unwrap_or(info);
         Ui {
             background,
             foreground,
@@ -368,7 +378,7 @@ impl Ui {
             focus,
             edit,
             error: get("error").unwrap_or(Color::Red),
-            warning: get("warning").unwrap_or(Color::Yellow),
+            warning,
             info,
             success,
             status_bg: get("status_bg").unwrap_or(Color::Rgb(30, 30, 40)),
@@ -377,12 +387,18 @@ impl Ui {
             float_bg: get("float_bg").filter(|c| *c != Color::Reset).or(background),
             match_bg: get("match_bg").unwrap_or(Color::Rgb(50, 60, 90)),
             match_fg: get("match_fg").filter(|c| *c != Color::Reset),
-            mode_fg: get("mode_fg").unwrap_or(background.unwrap_or(Color::Black)),
+            search_bg: get("search_bg").unwrap_or(mode_search),
+            search_fg: match map.get("search_fg") {
+                Some(_) => get("search_fg").filter(|c| *c != Color::Reset),
+                None => Some(mode_fg),
+            },
+            search_current_bg: get("search_current_bg").unwrap_or(warning),
+            mode_fg,
             mode_command: get("mode_command").unwrap_or(focus),
             mode_normal: get("mode_normal").unwrap_or(success),
             mode_insert: get("mode_insert").unwrap_or(edit),
             mode_visual: get("mode_visual").unwrap_or(Color::Magenta),
-            mode_search: get("mode_search").unwrap_or(info),
+            mode_search,
         }
     }
 }
@@ -498,6 +514,24 @@ impl Theme {
         let mut s = Style::default().fg(self.ui.foreground);
         if let Some(bg) = self.ui.float_bg {
             s = s.bg(bg);
+        }
+        s
+    }
+
+    /// A search match in the notebook.
+    pub fn search(&self) -> Style {
+        let mut s = Style::default().bg(self.ui.search_bg);
+        if let Some(fg) = self.ui.search_fg {
+            s = s.fg(fg);
+        }
+        s
+    }
+
+    /// The search match the cursor is on.
+    pub fn search_current(&self) -> Style {
+        let mut s = Style::default().bg(self.ui.search_current_bg).add_modifier(Modifier::BOLD);
+        if let Some(fg) = self.ui.search_fg {
+            s = s.fg(fg);
         }
         s
     }
@@ -635,6 +669,9 @@ const NVIM_UI: &[(&str, &[&str])] = &[
     ("float_bg", &["bg:NormalFloat", "bg:Pmenu"]),
     ("match_bg", &["bg:PmenuSel"]),
     ("match_fg", &["PmenuSel"]),
+    ("search_bg", &["bg:Search"]),
+    ("search_fg", &["Search"]),
+    ("search_current_bg", &["bg:CurSearch", "bg:IncSearch"]),
     ("mode_visual", &["@keyword", "Keyword", "Statement"]),
     ("mode_search", &["bg:Search", "WarningMsg"]),
 ];
@@ -848,6 +885,9 @@ pub fn describe(name: &str) -> Result<String> {
         ("float_bg", opt(u.float_bg)),
         ("match_bg", show(u.match_bg)),
         ("match_fg", opt(u.match_fg)),
+        ("search_bg", show(u.search_bg)),
+        ("search_fg", opt(u.search_fg)),
+        ("search_current_bg", show(u.search_current_bg)),
         ("mode_fg", show(u.mode_fg)),
         ("mode_command", show(u.mode_command)),
         ("mode_normal", show(u.mode_normal)),

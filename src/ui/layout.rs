@@ -23,6 +23,9 @@ pub struct LayoutCache {
     heights: Vec<Option<CellLayout>>,
     prefix: Vec<usize>,
     prefix_dirty: bool,
+    /// Bumped whenever a height is dropped or cells move, so derived data
+    /// (search matches) knows when to recompute.
+    generation: u64,
 }
 
 impl LayoutCache {
@@ -37,9 +40,14 @@ impl LayoutCache {
         self.width
     }
 
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn invalidate_all(&mut self) {
         self.heights.fill(None);
         self.prefix_dirty = true;
+        self.generation += 1;
     }
 
     pub fn invalidate_cell(&mut self, idx: usize) {
@@ -47,12 +55,14 @@ impl LayoutCache {
             *h = None;
         }
         self.prefix_dirty = true;
+        self.generation += 1;
     }
 
     pub fn inserted(&mut self, idx: usize) {
         let idx = idx.min(self.heights.len());
         self.heights.insert(idx, None);
         self.prefix_dirty = true;
+        self.generation += 1;
     }
 
     pub fn removed(&mut self, idx: usize) {
@@ -60,6 +70,7 @@ impl LayoutCache {
             self.heights.remove(idx);
         }
         self.prefix_dirty = true;
+        self.generation += 1;
     }
 
     pub fn moved(&mut self, from: usize, to: usize) {
@@ -67,6 +78,7 @@ impl LayoutCache {
             let h = self.heights.remove(from);
             self.heights.insert(to, h);
             self.prefix_dirty = true;
+            self.generation += 1;
         }
     }
 
@@ -76,6 +88,7 @@ impl LayoutCache {
         if self.heights.len() != n {
             self.heights.resize(n, None);
             self.prefix_dirty = true;
+            self.generation += 1;
         }
         for i in 0..n {
             if self.heights[i].is_none() {

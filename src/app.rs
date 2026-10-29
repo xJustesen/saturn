@@ -27,6 +27,7 @@ use crate::notebook::{Cell, CellKind, ExecState, Notebook, Output, io as nbio};
 use crate::render::RenderCache;
 use crate::render::image::ImageStore;
 use crate::render::plotly::PlotlySidecar;
+use crate::search::{self, Match, SearchInput, SearchState};
 use crate::ui;
 use crate::ui::cell::content_width;
 use crate::ui::layout::LayoutCache;
@@ -80,6 +81,7 @@ pub struct App {
     pub clipboard: Vec<Cell>,
     pub flash: Option<Flash>,
     pub overlay: Option<Overlay>,
+    pub search: SearchState,
     pub lang_ext: String,
     pub line_numbers: bool,
     pub view: Rect,
@@ -134,6 +136,7 @@ impl App {
             clipboard: Vec::new(),
             flash: None,
             overlay: None,
+            search: SearchState::default(),
             lang_ext: "py".to_string(),
             view: Rect::default(),
             log_path,
@@ -252,6 +255,9 @@ impl App {
                         ed.paste(text);
                     }
                     self.after_edit();
+                } else if let Some(inp) = &mut self.search.input {
+                    inp.text.push_str(text.trim_end_matches(['\n', '\r']));
+                    self.search_preview();
                 } else if let Some(Overlay::Prompt(p)) = &mut self.overlay {
                     p.value.push_str(text.trim_end_matches(['\n', '\r']));
                 } else if let Some(Overlay::Palette(p)) = &mut self.overlay {
@@ -427,6 +433,8 @@ impl App {
         if old != self.focused {
             self.layout.invalidate_cell(old);
             self.layout.invalidate_cell(self.focused);
+            // Like vim, `n` searches from the cursor, not from the last hit.
+            self.search.current = None;
         }
         self.scroll_to_focused();
     }
@@ -439,6 +447,10 @@ impl App {
         }
         if self.overlay.is_some() {
             self.on_overlay_key(key);
+            return;
+        }
+        if self.search.input.is_some() {
+            self.on_search_key(key);
             return;
         }
         if let Some(cmd) = keymap::global(&key) {
@@ -602,12 +614,16 @@ impl App {
                 self.clamp_scroll(self.view_height());
             }
             Command::ScrollUp => self.scroll_row = self.scroll_row.saturating_sub(1),
+            Command::Search => self.open_search(),
+            Command::SearchNext => self.search_step(true),
+            Command::SearchPrev => self.search_step(false),
             Command::EditCell => self.enter_edit(false),
             Command::EditCellInsert => self.enter_edit(true),
             Command::LeaveEdit => self.leave_edit(),
             Command::Escape => {
                 self.pending.clear();
                 self.flash = None;
+                self.search.hl = false;
             }
             Command::InsertAbove => self.insert_cell(self.focused, CellKind::Code),
             Command::InsertBelow => self.insert_cell(self.focused + 1, CellKind::Code),
@@ -1549,6 +1565,9 @@ impl App {
         self.scroll_row = 0;
         self.edit_snapshot = None;
         self.mode = Mode::Command;
+        self.search.matches.clear();
+        self.search.current = None;
+        self.search.generation = None;
     }
 
     fn load_notebook(&mut self, path: &Path) -> Result<()> {
@@ -1633,6 +1652,243 @@ impl App {
         if changed {
             self.nb.dirty = true;
         }
+    }
+}
+
+// ----- search -------------------------------------------------------------
+
+impl App {
+    /// Recompute the matches if cells, widths or wrapping changed since the
+    /// last time (called before every draw, cheap when nothing changed).
+    pub fn ensure_matches(&mut self) {
+        if self.search.query.is_empty() {
+            if !self.search.matches.is_empty() {
+                self.search.matches.clear();
+                self.search.current = None;
+            }
+            return;
+        }
+        if self.search.generation == Some(self.layout.generation()) {
+            return;
+        }
+        self.refresh_matches();
+    }
+
+    /// Find every occurrence of the pattern in the rendered rows of every
+    /// cell's source; keeps the current match if it still exists.
+    fn refresh_matches(&mut self) {
+        if self.view.width == 0 {
+            return;
+        }
+        self.ensure_layout(self.view.width);
+        let cur = self.search.current_match();
+        let mut matches = Vec::new();
+        if !self.search.query.is_empty() {
+            let pat = search::pattern(&self.search.query);
+            let sensitive = search::case_sensitive(&self.search.query);
+            let cw = content_width(self.view.width);
+            let tab = self.cfg.tab_width;
+            let wrap = self.cfg.wrap;
+            let App { nb, cache, .. } = self;
+            for (i, cell) in nb.cells.iter().enumerate() {
+                let plain;
+                let lines: &[ratatui::text::Line<'static>] = match cell.kind {
+                    CellKind::Markdown => {
+                        if cell.source.trim().is_empty() {
+                            continue;
+                        }
+                        &cache.markdown(&cell.id, &cell.source, cw, tab).lines
+                    }
+                    // Same geometry as the highlighted text (character wrap
+                    // after tab expansion), without highlighting every cell.
+                    CellKind::Code | CellKind::Raw => {
+                        let text = ui::text::plain(&ui::text::expand_tabs(&cell.source, tab), ratatui::style::Style::default());
+                        plain = ui::text::wrap_text(text, cw as usize, tab, wrap);
+                        &plain.lines
+                    }
+                };
+                for (row, line) in lines.iter().enumerate() {
+                    for (x, w) in search::find_in_line(line, &pat, sensitive) {
+                        matches.push(Match { cell: i, row: row as u16, x, w });
+                    }
+                }
+            }
+        }
+        self.search.current = cur.and_then(|c| matches.iter().position(|m| *m == c));
+        self.search.matches = matches;
+        self.search.generation = Some(self.layout.generation());
+    }
+
+    fn open_search(&mut self) {
+        if self.mode == Mode::Edit {
+            return;
+        }
+        self.pending.clear();
+        self.search.input = Some(SearchInput {
+            text: String::new(),
+            from_focus: self.focused,
+            from_scroll: self.scroll_row,
+            prev_query: self.search.query.clone(),
+            prev_hl: self.search.hl,
+        });
+    }
+
+    fn on_search_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => self.cancel_search(),
+            KeyCode::Char('c') if ctrl => self.cancel_search(),
+            KeyCode::Enter => self.confirm_search(),
+            KeyCode::Backspace => {
+                let Some(inp) = &mut self.search.input else { return };
+                if inp.text.is_empty() {
+                    self.cancel_search();
+                } else {
+                    inp.text.pop();
+                    self.search_preview();
+                }
+            }
+            KeyCode::Char('u') if ctrl => {
+                if let Some(inp) = &mut self.search.input {
+                    inp.text.clear();
+                }
+                self.search_preview();
+            }
+            KeyCode::Char('w') if ctrl => {
+                if let Some(inp) = &mut self.search.input {
+                    let t = inp.text.trim_end_matches(' ');
+                    let cut = t.rfind(' ').map(|i| i + 1).unwrap_or(0);
+                    inp.text.truncate(cut);
+                }
+                self.search_preview();
+            }
+            KeyCode::Char('g') if ctrl => self.search_step_in_prompt(true),
+            KeyCode::Char('t') if ctrl => self.search_step_in_prompt(false),
+            KeyCode::Char(c) if !ctrl && !alt => {
+                if let Some(inp) = &mut self.search.input {
+                    inp.text.push(c);
+                }
+                self.search_preview();
+            }
+            _ => {}
+        }
+    }
+
+    /// Incremental search: show the first match at or after where `/` was
+    /// pressed, or go back there while nothing matches.
+    fn search_preview(&mut self) {
+        let Some(inp) = &self.search.input else { return };
+        let from = inp.from_focus;
+        let from_scroll = inp.from_scroll;
+        self.search.query = inp.text.clone();
+        self.search.hl = true;
+        self.refresh_matches();
+        let first = self.search.matches.iter().position(|m| m.cell >= from).or(if self.search.matches.is_empty() { None } else { Some(0) });
+        match first {
+            Some(k) => self.goto_match(k),
+            None => {
+                self.set_focus(from);
+                self.scroll_row = from_scroll;
+                self.clamp_scroll(self.view_height());
+            }
+        }
+    }
+
+    /// Ctrl+G / Ctrl+T: move between matches without leaving the prompt.
+    fn search_step_in_prompt(&mut self, forward: bool) {
+        let Some(inp) = &self.search.input else { return };
+        if inp.text.is_empty() {
+            return;
+        }
+        self.search_step(forward);
+    }
+
+    fn cancel_search(&mut self) {
+        let Some(inp) = self.search.input.take() else { return };
+        self.search.query = inp.prev_query;
+        self.search.hl = inp.prev_hl;
+        self.search.generation = None;
+        self.set_focus(inp.from_focus);
+        self.scroll_row = inp.from_scroll;
+        self.clamp_scroll(self.view_height());
+    }
+
+    fn confirm_search(&mut self) {
+        let Some(inp) = self.search.input.take() else { return };
+        if inp.text.is_empty() {
+            // `/` + Enter repeats the previous search, like vim.
+            self.search.query = inp.prev_query;
+            self.search.hl = inp.prev_hl;
+            self.search.generation = None;
+            self.search_step(true);
+            return;
+        }
+        self.search.query = inp.text;
+        self.search.hl = true;
+        self.refresh_matches();
+        if self.search.matches.is_empty() {
+            let q = self.search.query.clone();
+            self.flash_err(format!("pattern not found: {q}"));
+        }
+    }
+
+    /// `n` / `N`: the next match after (before) the current one, or from the
+    /// focused cell when the cursor moved since the last hit.
+    fn search_step(&mut self, forward: bool) {
+        if self.mode == Mode::Edit {
+            return;
+        }
+        if self.search.query.is_empty() {
+            self.flash_err("no previous search");
+            return;
+        }
+        self.search.hl = true;
+        self.refresh_matches();
+        let n = self.search.matches.len();
+        if n == 0 {
+            let q = self.search.query.clone();
+            self.flash_err(format!("pattern not found: {q}"));
+            return;
+        }
+        let focused = self.focused;
+        let (next, wrapped) = match self.search.current {
+            Some(k) if k < n => {
+                if forward {
+                    ((k + 1) % n, k + 1 == n)
+                } else {
+                    ((k + n - 1) % n, k == 0)
+                }
+            }
+            _ => {
+                let m = &self.search.matches;
+                if forward {
+                    match m.iter().position(|x| x.cell >= focused) {
+                        Some(k) => (k, false),
+                        None => (0, true),
+                    }
+                } else {
+                    match m.iter().rposition(|x| x.cell <= focused) {
+                        Some(k) => (k, false),
+                        None => (n - 1, true),
+                    }
+                }
+            }
+        };
+        self.goto_match(next);
+        if wrapped {
+            self.flash(if forward { "search hit BOTTOM, continuing at TOP" } else { "search hit TOP, continuing at BOTTOM" });
+        }
+    }
+
+    /// Focus the match's cell and bring its row into view.
+    fn goto_match(&mut self, k: usize) {
+        let Some(m) = self.search.matches.get(k).copied() else { return };
+        self.set_focus(m.cell);
+        self.ensure_layout(self.view.width.max(1));
+        let row = self.layout.row_of(m.cell) + m.row as usize;
+        self.scroll_into_view(row, row);
+        self.search.current = Some(k);
     }
 }
 

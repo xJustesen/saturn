@@ -6,13 +6,14 @@ use ratatui::style::Style;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
 use crate::app::{App, Mode};
-use crate::ui::cell::{self, CellCtx};
+use crate::ui::cell::{self, CellCtx, BAR_W, GUTTER_W};
 
 pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
     if area.width < 12 || area.height == 0 {
         return;
     }
     app.ensure_layout(area.width);
+    app.ensure_matches();
     app.clamp_scroll(area.height as usize);
     let n = app.nb.cells.len();
     if n == 0 {
@@ -24,8 +25,11 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
     let total_rows = app.layout.total_rows();
     let scroll_row = app.scroll_row;
     let focused = app.focused;
-    let App { nb, layout, cache, images, plotly, cfg, theme, lang_ext, line_numbers, .. } = app;
+    let App { nb, layout, cache, images, plotly, cfg, theme, lang_ext, line_numbers, search, .. } = app;
     let mut ctx = CellCtx { cfg, theme, cache, images, plotly, lang_ext, line_numbers: *line_numbers };
+    let hl = search.active();
+    let cx = area.x + GUTTER_W + BAR_W;
+    let cw = cell::content_width(area.width);
     for i in first..n {
         let Some(l) = layout.layout(i) else { break };
         if top >= area.height as i64 {
@@ -34,6 +38,20 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
         let h = l.total as i64;
         if top + h > 0 {
             cell::render(&mut nb.cells[i], l, i == focused, editing && i == focused, area, top as i32, &mut ctx, buf);
+            // Search matches go over the source rows; the editor draws its
+            // own search while a cell is being edited.
+            if hl && !(editing && i == focused) {
+                for k in search.range_of(i) {
+                    let m = search.matches[k];
+                    let y = top + m.row as i64;
+                    if y < 0 || y >= area.height as i64 || m.row >= l.source_rows || m.x >= cw {
+                        continue;
+                    }
+                    let st = if search.current == Some(k) { theme.search_current() } else { theme.search() };
+                    let w = m.w.min(cw - m.x);
+                    buf.set_style(Rect::new(cx + m.x, area.y + y as u16, w, 1), st);
+                }
+            }
         }
         top += h;
     }

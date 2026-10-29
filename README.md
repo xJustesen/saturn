@@ -65,6 +65,14 @@ Notebook (command mode):
 | `u` / `Ctrl+R` | undo / redo cell operation | `Ctrl+P` | command palette |
 | `o` / `O` | toggle (or expand) / clear outputs | `?` | help |
 | `z` | inspect output in a popout | `q` | quit |
+| `/` | search the notebook | `n` / `N` | next / previous match |
+
+`/` searches every cell's text as it is shown (code, markdown, raw) and jumps to
+the first match while you type, like vim's incremental search. `Enter` keeps the
+position, `Esc` goes back to where you were, `Ctrl+G`/`Ctrl+T` step through the
+matches from the prompt. `n` / `N` repeat the search forwards / backwards, wrapping
+around the notebook. The pattern is plain text with smart case (all lowercase
+matches any case). `Esc` in command mode clears the highlights; `n` brings them back.
 
 Inside a cell the editor is vim-modal (`hjkl`, `dd`, `yy`, `p`, `ciw`, `v`, `/`, `u`, …).
 `Shift+Enter`, `Ctrl+Enter`, `Alt+Enter`, `Ctrl+S`, `Ctrl+P`, `Ctrl+C` and `Ctrl+Q`
@@ -156,7 +164,8 @@ with `fg`, `bg`, `bold`, `italic`, `underline`.
 `selection`, `cursor_line`, `input_bg` (full-row tint behind code inputs, so they
 stand out from outputs), `focus` (bar on the focused cell, borders), `edit` (bar
 while editing), `error`, `warning`, `info`, `success`, `status_bg`, `status_fg`,
-`border`, `float_bg`, `match_bg`, `match_fg` (picker selection), `mode_fg`,
+`border`, `float_bg`, `match_bg`, `match_fg` (picker selection), `search_bg`,
+`search_fg`, `search_current_bg` (search matches, and the one the cursor is on), `mode_fg`,
 `mode_command`, `mode_normal`, `mode_insert`, `mode_visual`, `mode_search`. Unset
 keys fall back to sensible relatives (`border` → `focus`, `mode_insert` → `edit`,
 `input_bg` → a shade of `background`, …). With no `background` (and no `input_bg`)

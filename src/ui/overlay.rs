@@ -304,6 +304,8 @@ NOTEBOOK (command mode)            CELL EDITING
   u / Ctrl+R     undo / redo cell op
   o / O          toggle / clear outputs
   z              inspect output (popout)
+  / · n · N      search · next / prev match
+  Esc            clear search highlight
                                     FILES & UI
   K              select kernel        Ctrl+S   save
   Ctrl+P         command palette      Ctrl+O   open file / browse

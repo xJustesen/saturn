@@ -11,6 +11,10 @@ pub enum Command {
     HalfPageUp,
     ScrollDown,
     ScrollUp,
+    // search
+    Search,
+    SearchNext,
+    SearchPrev,
     // modes
     EditCell,
     EditCellInsert,
@@ -113,6 +117,9 @@ pub const PALETTE: &[CommandInfo] = &[
     CommandInfo { cmd: Command::ToggleLineNumbers, name: "Toggle line numbers", keys: "" },
     CommandInfo { cmd: Command::ToggleWrap, name: "Toggle line wrap", keys: "" },
     CommandInfo { cmd: Command::SelectTheme, name: "Select theme…", keys: "" },
+    CommandInfo { cmd: Command::Search, name: "Search notebook…", keys: "/" },
+    CommandInfo { cmd: Command::SearchNext, name: "Next search match", keys: "n" },
+    CommandInfo { cmd: Command::SearchPrev, name: "Previous search match", keys: "N" },
     CommandInfo { cmd: Command::Help, name: "Show help", keys: "?" },
     CommandInfo { cmd: Command::ShowLogPath, name: "Show log file path", keys: "" },
     CommandInfo { cmd: Command::Quit, name: "Quit", keys: "q" },

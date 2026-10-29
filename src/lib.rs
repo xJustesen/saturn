@@ -8,6 +8,7 @@ pub mod keymap;
 pub mod kernel;
 pub mod notebook;
 pub mod render;
+pub mod search;
 pub mod theme;
 pub mod ui;
 
