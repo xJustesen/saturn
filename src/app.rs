@@ -20,6 +20,7 @@ use crate::commands::{Command, PALETTE};
 use crate::config::Config;
 use crate::theme::Theme;
 use crate::editor::{CellEditor, language_extension};
+use crate::files::{human_size, shorten_path};
 use crate::kernel::{KernelCommand, KernelEvent, KernelHandle, KernelStatus, ReplyStatus, startup};
 use crate::keymap::{self, Key, KeyAction};
 use crate::notebook::undo::CellOp;
@@ -1922,37 +1923,4 @@ impl App {
         self.scroll_into_view(row, row);
         self.search.current = Some(k);
     }
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "K", "M", "G"];
-    let mut v = bytes as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 { format!("{bytes} B") } else { format!("{v:.1}{}", UNITS[i]) }
-}
-
-fn shorten_path(p: &Path, max: usize) -> String {
-    let mut s = p.display().to_string();
-    if let Some(home) = dirs::home_dir()
-        && let Ok(rest) = p.strip_prefix(&home)
-    {
-        s = format!("~/{}", rest.display());
-    }
-    if s.chars().count() <= max {
-        return s;
-    }
-    let parts: Vec<&str> = s.split('/').collect();
-    let mut tail = String::new();
-    for part in parts.iter().rev() {
-        let candidate = if tail.is_empty() { part.to_string() } else { format!("{part}/{tail}") };
-        if candidate.chars().count() + 2 > max {
-            break;
-        }
-        tail = candidate;
-    }
-    format!("…/{tail}")
 }

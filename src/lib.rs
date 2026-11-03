@@ -4,6 +4,7 @@ pub mod app;
 pub mod commands;
 pub mod config;
 pub mod editor;
+pub mod files;
 pub mod keymap;
 pub mod kernel;
 pub mod notebook;
