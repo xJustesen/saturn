@@ -31,8 +31,14 @@ pub struct Config {
     pub tab_width: usize,
     /// Wrap long lines in cells.
     pub wrap: bool,
-    /// Fuzzy file browser: show hidden entries.
+    /// Files picker: list hidden files and folders (dot names). Toggle with Alt+H.
     pub show_hidden: bool,
+    /// Files picker: list files matched by .gitignore. Notebooks are always
+    /// listed. Toggle with Alt+I.
+    pub show_ignored: bool,
+    /// Files picker: show Nerd Font file-type icons. Needs a Nerd Font, which
+    /// Ghostty includes.
+    pub icons: bool,
 }
 
 impl Default for Config {
@@ -48,6 +54,8 @@ impl Default for Config {
             tab_width: 4,
             wrap: true,
             show_hidden: false,
+            show_ignored: false,
+            icons: true,
         }
     }
 }
@@ -141,6 +149,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("saturn-config-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("sub").join("config.toml")
+    }
+
+    #[test]
+    fn picker_keys_default_and_parse() {
+        let cfg: Config = toml::from_str("theme = \"nord\"\n").unwrap();
+        assert!(!cfg.show_hidden && !cfg.show_ignored && cfg.icons);
+        let cfg: Config = toml::from_str("icons = false\nshow_ignored = true\n").unwrap();
+        assert!(!cfg.icons && cfg.show_ignored);
     }
 
     #[test]
