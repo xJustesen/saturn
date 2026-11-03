@@ -124,7 +124,7 @@ fn syn_to_style(s: SynStyle) -> Style {
 /// Syntax-highlight `source` into owned lines (no wrapping).
 pub fn highlight(source: &str, ext: &str, theme: &SynTheme, tab_width: usize) -> Text<'static> {
     let source = expand_tabs(source, tab_width);
-    let ss = &*edtui::SYNTAX_SET;
+    let ss = &*crate::syntax::SYNTAX_SET;
     let Some(syntax) = ss.find_syntax_by_extension(ext) else {
         return Text::from(source.split('\n').map(|l| Line::from(l.to_string())).collect::<Vec<_>>());
     };

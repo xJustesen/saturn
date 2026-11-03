@@ -184,12 +184,12 @@ pub fn render(
                 .tab_width(tab)
                 .line_numbers(if ctx.line_numbers { LineNumbers::Absolute } else { LineNumbers::None });
             let ext = if cell.kind == CellKind::Markdown { "md" } else { ctx.lang_ext };
-            if let Some(syntax) = edtui::SYNTAX_SET.find_syntax_by_extension(ext) {
+            if let Some(syntax) = crate::syntax::by_extension(ext) {
                 let h = SyntaxHighlighter::with_sets(
                     theme.syntax.clone(),
                     edtui::THEME_SET.clone(),
                     syntax.clone(),
-                    edtui::SYNTAX_SET.clone(),
+                    crate::syntax::SYNTAX_SET.clone(),
                 );
                 view = view.syntax_highlighter(Some(h));
             }

@@ -46,7 +46,10 @@ pub const SYNTAX_KEYS: &[(&str, &str)] = &[
         "keyword.exception",
         "keyword.control.flow.raise, keyword.control.flow.try, keyword.control.flow.except, keyword.control.flow.finally, keyword.control.exception, keyword.control.trycatch",
     ),
-    ("keyword.function", "storage.type.function, storage.type.class, storage.modifier.async"),
+    (
+        "keyword.function",
+        "storage.type.function, storage.type.class, storage.modifier.async, keyword.declaration.function, keyword.declaration.class",
+    ),
     ("operator", "keyword.operator"),
     ("keyword.operator", "keyword.operator.logical, keyword.operator.word, keyword.operator.wordlike, keyword.other.await"),
     ("string", "string"),
