@@ -11,13 +11,12 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Widget};
-use unicode_width::UnicodeWidthStr;
 
 use crate::notebook::{Cell, CellKind, ExecState, Output};
 use crate::render::{html, richest};
 use crate::theme::Theme;
 use crate::ui::fuzzy::Fuzzy;
-use crate::ui::text::expand_tabs;
+use crate::ui::text::{cut, expand_tabs};
 
 /// What kind of output a cell's excerpt describes; picks the glyph and colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,24 +259,6 @@ fn plotly_dims(v: &serde_json::Value) -> Option<(u64, u64)> {
     Some((layout.get("width")?.as_u64()?, layout.get("height")?.as_u64()?))
 }
 
-fn cut(s: &str, max: usize) -> String {
-    if s.width() <= max {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    let mut w = 0;
-    for ch in s.chars() {
-        let cw = UnicodeWidthStr::width(ch.encode_utf8(&mut [0; 4]) as &str);
-        if w + cw + 1 > max {
-            break;
-        }
-        out.push(ch);
-        w += cw;
-    }
-    out.push('…');
-    out
-}
-
 // ----- drawing -----------------------------------------------------------------
 
 pub fn render(buf: &mut Buffer, area: Rect, p: &CellPickerState, theme: &Theme) {
@@ -393,12 +374,5 @@ mod tests {
         let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
         assert_eq!(png_dims(b64), Some((1, 1)));
         assert_eq!(png_dims("not png"), None);
-    }
-
-    #[test]
-    fn cut_keeps_width() {
-        assert_eq!(cut("abcdef", 4), "abc…");
-        assert_eq!(cut("abc", 4), "abc");
-        assert_eq!(cut("日本語テキスト", 5), "日本…");
     }
 }
