@@ -2,6 +2,7 @@
 
 pub mod cell;
 pub mod cell_picker;
+pub mod fuzzy;
 pub mod layout;
 pub mod notebook_view;
 pub mod overlay;

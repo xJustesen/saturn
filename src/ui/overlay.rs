@@ -4,8 +4,7 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
+use nucleo_matcher::Utf32String;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -15,6 +14,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wra
 use crate::commands::Command;
 use crate::theme::Theme;
 use crate::ui::cell_picker::CellPickerState;
+use crate::ui::fuzzy::Fuzzy;
 use crate::ui::popout::PopoutState;
 
 pub enum Overlay {
@@ -90,7 +90,7 @@ pub struct PaletteState {
     pub items: Vec<PaletteItem>,
     pub filtered: Vec<usize>,
     pub selected: usize,
-    matcher: Matcher,
+    fuzzy: Fuzzy,
 }
 
 pub enum PaletteAction {
@@ -114,7 +114,7 @@ impl PaletteState {
             items,
             filtered: Vec::new(),
             selected: 0,
-            matcher: Matcher::new(MatcherConfig::DEFAULT),
+            fuzzy: Fuzzy::new(false),
         };
         s.filter();
         s
@@ -124,18 +124,11 @@ impl PaletteState {
         if self.query.is_empty() {
             self.filtered = (0..self.items.len()).collect();
         } else {
-            let pat = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
-            let mut buf = Vec::new();
-            let mut scored: Vec<(usize, u32)> = Vec::new();
-            for (i, item) in self.items.iter().enumerate() {
-                let hay = format!("{} {}", item.label, item.detail);
-                let h = Utf32Str::new(&hay, &mut buf);
-                if let Some(score) = pat.score(h, &mut self.matcher) {
-                    scored.push((i, score));
-                }
-            }
-            scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            self.filtered = scored.into_iter().map(|(i, _)| i).collect();
+            self.fuzzy.set_query(&self.query);
+            let hays: Vec<Utf32String> =
+                self.items.iter().map(|item| Utf32String::from(format!("{} {}", item.label, item.detail))).collect();
+            let ranked = self.fuzzy.rank(hays.iter().enumerate().map(|(i, h)| (i as u32, h.slice(..), 0)));
+            self.filtered = ranked.into_iter().map(|i| i as usize).collect();
         }
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
     }

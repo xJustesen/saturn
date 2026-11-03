@@ -5,8 +5,7 @@
 use base64::Engine;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jupyter_protocol::MediaType;
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
+use nucleo_matcher::Utf32String;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -17,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::notebook::{Cell, CellKind, ExecState, Output};
 use crate::render::{html, richest};
 use crate::theme::Theme;
+use crate::ui::fuzzy::Fuzzy;
 use crate::ui::text::expand_tabs;
 
 /// What kind of output a cell's excerpt describes; picks the glyph and colour.
@@ -70,7 +70,7 @@ pub struct CellPickerState {
     pub focused: usize,
     /// Cells currently on screen (inclusive).
     pub visible: (usize, usize),
-    matcher: Matcher,
+    fuzzy: Fuzzy,
 }
 
 impl CellPickerState {
@@ -83,7 +83,7 @@ impl CellPickerState {
             selected: focused,
             focused,
             visible,
-            matcher: Matcher::new(MatcherConfig::DEFAULT),
+            fuzzy: Fuzzy::new(false),
         };
         s.filter();
         s
@@ -112,21 +112,17 @@ impl CellPickerState {
             self.selected = self.selected.min(n.saturating_sub(1));
             return;
         }
-        let pat = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
-        let mut buf = Vec::new();
-        let mut scored: Vec<(usize, u32)> = Vec::new();
-        for (i, row) in self.rows.iter().enumerate() {
-            let hay = match &row.out {
-                Some((_, x)) => format!("{} {}", row.source, x),
-                None => row.source.clone(),
-            };
-            let h = Utf32Str::new(&hay, &mut buf);
-            if let Some(score) = pat.score(h, &mut self.matcher) {
-                scored.push((i, score));
-            }
-        }
-        scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        self.filtered = scored.into_iter().map(|(i, _)| i).collect();
+        self.fuzzy.set_query(&self.query);
+        let hays: Vec<Utf32String> = self
+            .rows
+            .iter()
+            .map(|row| match &row.out {
+                Some((_, x)) => Utf32String::from(format!("{} {}", row.source, x)),
+                None => Utf32String::from(row.source.as_str()),
+            })
+            .collect();
+        let ranked = self.fuzzy.rank(hays.iter().enumerate().map(|(i, h)| (i as u32, h.slice(..), 0)));
+        self.filtered = ranked.into_iter().map(|i| i as usize).collect();
         self.selected = 0;
     }
 
