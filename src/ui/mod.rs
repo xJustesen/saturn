@@ -34,6 +34,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         popout::render(buf, main, p, cell, popout::PopoutCtx { cfg, theme, images, plotly });
         return;
     }
+    // The files picker covers the notebook for the same reason.
+    if matches!(app.overlay, Some(Overlay::Files(_))) {
+        status_bar::render(buf, status, app);
+        let App { theme, overlay, .. } = app;
+        let Some(Overlay::Files(p)) = overlay else { return };
+        file_picker::render(buf, main, p, theme);
+        return;
+    }
     notebook_view::render(buf, main, app);
     status_bar::render(buf, status, app);
     if let Some(ov) = &mut app.overlay {

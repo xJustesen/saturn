@@ -8,7 +8,7 @@ A blazingly fast, keyboard-first Jupyter notebook for the terminal.
   protocol (Ghostty, Kitty, WezTerm), iTerm2 or Sixel, falling back to unicode halfblocks
   (e.g. inside tmux).
 - Vim-modal editing inside cells, Jupyter-style cell commands around them.
-- Fuzzy command palette, file browser and kernel picker.
+- Fuzzy command palette, files picker with preview, and kernel picker.
 
 ## Install
 
@@ -17,7 +17,8 @@ make install            # release build, installed to ~/.local/bin
 make install PREFIX=/usr/local
 ```
 
-or `cargo install --path .` to put it in `~/.cargo/bin`.
+`make install` puts the binary in `~/.local/bin`, and `cargo install` puts a second copy in
+`~/.cargo/bin`. When `~/.cargo/bin` comes first on `PATH`, that copy hides the other.
 
 Requires a Rust toolchain. Kernels are discovered from the usual Jupyter data
 directories, from `uv tool` installs (e.g. `uv tool install jupyterlab`) and from
@@ -38,8 +39,8 @@ sidecar is never started.
 
 ```bash
 saturn notebook.ipynb        # open a notebook (kernel from its metadata)
-saturn                       # browse the current directory
-saturn dir/ --kernel python3 # browse a directory, force a kernelspec name
+saturn                       # list the files of the git repository (or of the directory) in the files picker
+saturn dir/ --kernel python3 # the same for dir/, and force a kernelspec name
 ```
 
 Logs go to `~/Library/Caches/saturn/saturn.log` (or `$XDG_CACHE_HOME/saturn`);
@@ -61,7 +62,7 @@ Notebook (command mode):
 | `Ctrl+K` / `Ctrl+J` | move cell up / down | `00` | restart kernel |
 | `m` / `y` / `r` | to markdown / code / raw | `K` | select kernel |
 | `M` | merge with cell below | `Ctrl+S` | save |
-| `Ctrl+_` | split cell at cursor (while editing) | `Ctrl+O` | open file / browse |
+| `Ctrl+_` | split cell at cursor (while editing) | `Ctrl+O` | find file (picker with preview) |
 | `u` / `Ctrl+R` | undo / redo cell operation | `Ctrl+P` | command palette |
 | `o` / `O` | toggle (or expand) / clear outputs | `?` | help |
 | `z` | inspect output in a popout | `q` | quit |
@@ -82,6 +83,46 @@ position, `Esc` goes back to where you were, `Ctrl+G`/`Ctrl+T` step through the
 matches from the prompt. `n` / `N` repeat the search forwards / backwards, wrapping
 around the notebook. The pattern is plain text with smart case (all lowercase
 matches any case). `Esc` in command mode clears the highlights; `n` brings them back.
+
+### Files picker
+
+`Ctrl+O` (and `saturn` or `saturn dir/` without a notebook) opens the files picker:
+every file under the root in one flat list on the left, narrowed by fuzzy-matching
+what you type against the path, and a preview of the selected file on the right.
+The root is the git repository that holds the open notebook's folder (or the
+current directory), or that folder itself outside a repository; it stays fixed
+while the picker is open. To list another folder, start saturn there.
+
+Files matched by `.gitignore` (and `.git/info/exclude` and git's global excludes
+file) and hidden (dot-named) files and folders are left out by default; `.git`,
+`node_modules`, virtual environments, `__pycache__`, cache folders (those holding a
+`CACHEDIR.TAG`, such as Cargo's `target/`) and `~/Library` are never listed.
+Notebooks are always listed, even inside gitignored folders. Very large roots (such
+as `~`) stop at 50,000 listed files; the counter then shows a `+`.
+
+Text files are previewed highlighted, with line numbers (the first 1,000 lines; files
+over 256 KB get no preview). Notebooks are previewed as their code and markdown cells,
+without outputs. Binary files, special files and folders get a one-line note.
+`Enter` on a notebook opens it (asking first if the open notebook has unsaved changes;
+answering no reopens the picker); on any other file it only says that saturn opens
+`.ipynb` files.
+
+| Key | Action |
+|---|---|
+| typing (including `j` and `k`) | edit the query |
+| `↑` / `↓`, `Ctrl+P` / `Ctrl+N`, `Ctrl+K` / `Ctrl+J`, `Tab` / `Shift+Tab` | move |
+| `PgUp` / `PgDn` | move by a page |
+| `Enter` | open the notebook |
+| `Ctrl+U` | clear the query |
+| `Ctrl+F` / `Ctrl+B` | scroll the preview |
+| `Alt+H` (or `Ctrl+H`) | show hidden files (scans again) |
+| `Alt+I` | show ignored files |
+| `Esc` | close |
+
+`Alt` keys need the terminal to send Option as Meta (`macos-option-as-alt` in
+Ghostty). Without it, `Ctrl+H` still toggles hidden files, and `show_ignored` in the
+config sets the ignored filter. The file-type icons need a Nerd Font (Ghostty
+includes one); `icons = false` turns them off.
 
 Inside a cell the editor is vim-modal (`hjkl`, `dd`, `yy`, `p`, `ciw`, `v`, `/`, `u`, …).
 `Shift+Enter`, `Ctrl+Enter`, `Alt+Enter`, `Ctrl+S`, `Ctrl+P`, `Ctrl+C` and `Ctrl+Q`
@@ -112,10 +153,14 @@ theme = "tokyo-night"          # see Themes below
 line_numbers = false
 tab_width = 4
 wrap = true
-show_hidden = false            # file browser
+show_hidden = false            # files picker: list dot-named files and folders (Alt+H)
+show_ignored = false           # files picker: list .gitignored files (Alt+I); notebooks always show
+icons = true                   # files picker: Nerd Font file-type icons
 ```
 
 On macOS the same `~/.config/saturn/` directory is used (`$XDG_CONFIG_HOME` is honoured).
+An invalid value for any key (such as `icons = "yes"`) makes saturn ignore the whole
+config file and use the defaults; the log says why.
 
 ## Themes
 
@@ -126,6 +171,8 @@ path to a `.toml` file, or (syntax colors only) one of syntect's bundled themes.
 `Enter` keeps it and writes `theme = "<name>"` to `config.toml` so the next launch
 starts with it (other keys and comments in the file are left as they are), `Esc`
 reverts to the previous one.
+
+Highlighting uses the two-face syntax set, which holds the syntaxes of the `bat` tool.
 
 Built in: `tokyo-night`, `tokyo-night-storm`, `monokai`, `catppuccin-mocha`, `dracula`,
 `gruvbox-dark`, `nord`, `one-dark`, `solarized-dark`, `solarized-light`, `github-dark`

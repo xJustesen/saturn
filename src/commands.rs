@@ -112,7 +112,7 @@ pub const PALETTE: &[CommandInfo] = &[
     CommandInfo { cmd: Command::RedoCellOp, name: "Redo cell operation", keys: "Ctrl+R" },
     CommandInfo { cmd: Command::Save, name: "Save notebook", keys: "Ctrl+S" },
     CommandInfo { cmd: Command::SaveAs, name: "Save notebook as…", keys: "" },
-    CommandInfo { cmd: Command::OpenFile, name: "Open file…", keys: "Ctrl+O" },
+    CommandInfo { cmd: Command::OpenFile, name: "Find file…", keys: "Ctrl+O" },
     CommandInfo { cmd: Command::NewNotebook, name: "New notebook", keys: "" },
     CommandInfo { cmd: Command::Reload, name: "Reload notebook from disk", keys: "" },
     CommandInfo { cmd: Command::ToggleLineNumbers, name: "Toggle line numbers", keys: "" },

@@ -1,4 +1,4 @@
-//! Modal overlays: fuzzy palette (commands / kernels / files), prompts,
+//! Modal overlays: fuzzy palette (commands / kernels / themes), prompts,
 //! confirmations and the help screen.
 
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wra
 use crate::commands::Command;
 use crate::theme::Theme;
 use crate::ui::cell_picker::CellPickerState;
+use crate::ui::file_picker::FilePickerState;
 use crate::ui::fuzzy::Fuzzy;
 use crate::ui::popout::PopoutState;
 
@@ -26,6 +27,28 @@ pub enum Overlay {
     Cells(CellPickerState),
     /// Drawn by [`crate::ui::popout`], not here.
     Popout(PopoutState),
+    /// `Ctrl+O`: drawn by [`crate::ui::file_picker`], not here.
+    Files(Box<FilePickerState>),
+}
+
+impl Overlay {
+    /// Pasted text: appended (trimmed) to a picker's query, or to a prompt's
+    /// value without trailing newlines. Other overlays ignore it.
+    pub fn paste(&mut self, text: &str) {
+        match self {
+            Overlay::Palette(p) => {
+                p.query.push_str(text.trim());
+                p.filter();
+            }
+            Overlay::Cells(p) => {
+                p.query.push_str(text.trim());
+                p.filter();
+            }
+            Overlay::Files(p) => p.push_query(text.trim()),
+            Overlay::Prompt(p) => p.value.push_str(text.trim_end_matches(['\n', '\r'])),
+            Overlay::Confirm(_) | Overlay::Help | Overlay::Popout(_) => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +71,8 @@ pub enum ConfirmKind {
     Quit,
     RestartKernel,
     RestartAndRunAll,
-    OpenDiscard(PathBuf),
+    /// `reopen`: the files picker's `start`, to reopen it on "no".
+    OpenDiscard { path: PathBuf, reopen: Option<PathBuf> },
     NewDiscard(PathBuf),
     ReloadDiscard,
 }
@@ -63,9 +87,6 @@ pub enum ItemData {
     Command(Command),
     Kernel(usize),
     Theme(String),
-    Dir(PathBuf),
-    File(PathBuf),
-    NewNotebook(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +101,6 @@ pub enum PaletteKind {
     Commands,
     Kernels,
     Themes,
-    Files(PathBuf),
 }
 
 pub struct PaletteState {
@@ -97,12 +117,6 @@ pub enum PaletteAction {
     None,
     Close,
     Accept(ItemData),
-    /// File browser: go to the parent directory.
-    Parent,
-    /// File browser: go to the home directory.
-    Home,
-    /// File browser: toggle hidden files.
-    ToggleHidden,
 }
 
 impl PaletteState {
@@ -159,22 +173,9 @@ impl PaletteState {
                 self.query.clear();
                 self.filter();
             }
-            KeyCode::Char('h') if ctrl => return PaletteAction::ToggleHidden,
             KeyCode::Backspace => {
-                if self.query.is_empty() {
-                    if matches!(self.kind, PaletteKind::Files(_)) {
-                        return PaletteAction::Parent;
-                    }
-                } else {
-                    self.query.pop();
-                    self.filter();
-                }
-            }
-            KeyCode::Char('~') if self.query.is_empty() && matches!(self.kind, PaletteKind::Files(_)) => {
-                return PaletteAction::Home;
-            }
-            KeyCode::Char('-') if self.query.is_empty() && matches!(self.kind, PaletteKind::Files(_)) => {
-                return PaletteAction::Parent;
+                self.query.pop();
+                self.filter();
             }
             KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
                 self.query.push(c);
@@ -210,7 +211,7 @@ pub fn render(buf: &mut Buffer, area: Rect, overlay: &mut Overlay, theme: &Theme
         Overlay::Confirm(c) => render_confirm(buf, area, c, theme),
         Overlay::Help => render_help(buf, area, theme),
         Overlay::Cells(p) => crate::ui::cell_picker::render(buf, area, p, theme),
-        Overlay::Popout(_) => {}
+        Overlay::Popout(_) | Overlay::Files(_) => {}
     }
 }
 
@@ -306,7 +307,7 @@ NOTEBOOK (command mode)            CELL EDITING
   Esc            clear search highlight
                                     FILES & UI
   K              select kernel        Ctrl+S   save
-  Ctrl+P         command palette      Ctrl+O   open file / browse
+  Ctrl+P         command palette      Ctrl+O   find file
   ?              this help            q        quit
 ";
 

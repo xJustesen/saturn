@@ -20,7 +20,8 @@ use crate::commands::{Command, PALETTE};
 use crate::config::Config;
 use crate::theme::Theme;
 use crate::editor::{CellEditor, language_extension};
-use crate::files::{human_size, shorten_path};
+use crate::files::PickerPrefs;
+use crate::files::preview::{PreviewWorker, UiColors};
 use crate::kernel::{KernelCommand, KernelEvent, KernelHandle, KernelStatus, ReplyStatus, startup};
 use crate::keymap::{self, Key, KeyAction};
 use crate::notebook::undo::CellOp;
@@ -33,6 +34,7 @@ use crate::ui;
 use crate::ui::cell::content_width;
 use crate::ui::cell_picker::{CellPickerState, PickerAction};
 use crate::ui::layout::LayoutCache;
+use crate::ui::file_picker::{FileAction, FilePickerState, PickerCtx, ThreadIo};
 use crate::ui::overlay::{
     ConfirmKind, ConfirmState, ItemData, Overlay, PaletteAction, PaletteItem, PaletteKind,
     PaletteState, PromptKind, PromptState,
@@ -46,6 +48,8 @@ pub enum AppEvent {
     PlotlyDone { hash: u64, result: Result<Vec<u8>, String> },
     PlotlyFatal(String),
     Kernelspecs(Vec<KernelspecDir>),
+    /// From the files picker's scanner and preview worker.
+    Files(crate::files::FilesEvent),
     Tick,
 }
 
@@ -90,7 +94,7 @@ pub struct App {
     pub log_path: PathBuf,
     pub spinner: usize,
     pub graphics_label: String,
-    show_hidden: bool,
+    picker_prefs: PickerPrefs,
     edit_snapshot: Option<(usize, Cell)>,
     opts_kernel: Option<String>,
     want_kernel: bool,
@@ -130,7 +134,7 @@ impl App {
             kernel: None,
             kernelspecs: None,
             line_numbers: cfg.line_numbers,
-            show_hidden: cfg.show_hidden,
+            picker_prefs: PickerPrefs { show_hidden: cfg.show_hidden, show_ignored: cfg.show_ignored },
             cfg,
             theme,
             theme_before_pick: None,
@@ -160,7 +164,7 @@ impl App {
             });
         }
         match opts.path {
-            Some(p) if p.is_dir() => app.open_browser(p),
+            Some(p) if p.is_dir() => app.open_file_picker(p, None),
             Some(p) => {
                 if let Err(e) = app.load_notebook(&p) {
                     if p.exists() {
@@ -174,7 +178,7 @@ impl App {
                     }
                 }
             }
-            None => app.open_browser(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            None => app.open_file_picker(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), None),
         }
         Ok(app)
     }
@@ -260,14 +264,8 @@ impl App {
                 } else if let Some(inp) = &mut self.search.input {
                     inp.text.push_str(text.trim_end_matches(['\n', '\r']));
                     self.search_preview();
-                } else if let Some(Overlay::Prompt(p)) = &mut self.overlay {
-                    p.value.push_str(text.trim_end_matches(['\n', '\r']));
-                } else if let Some(Overlay::Palette(p)) = &mut self.overlay {
-                    p.query.push_str(text.trim());
-                    p.filter();
-                } else if let Some(Overlay::Cells(p)) = &mut self.overlay {
-                    p.query.push_str(text.trim());
-                    p.filter();
+                } else if let Some(ov) = &mut self.overlay {
+                    ov.paste(&text);
                 }
                 self.dirty_ui = true;
             }
@@ -312,7 +310,19 @@ impl App {
                 }
                 self.dirty_ui = true;
             }
+            AppEvent::Files(ev) => {
+                if let Some(Overlay::Files(p)) = &mut self.overlay
+                    && p.on_event(ev)
+                {
+                    self.dirty_ui = true;
+                }
+            }
             AppEvent::Tick => {
+                if let Some(Overlay::Files(p)) = &mut self.overlay
+                    && p.on_tick()
+                {
+                    self.dirty_ui = true;
+                }
                 let busy = self
                     .kernel
                     .as_ref()
@@ -523,7 +533,15 @@ impl App {
                         self.overlay = None;
                         self.confirm(kind, false);
                     }
-                    KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.overlay = None;
+                        // Esc means "no" only where "no" does nothing
+                        // drastic; for Quit, `confirm(Quit, false)` would
+                        // quit without saving.
+                        if matches!(kind, ConfirmKind::OpenDiscard { .. }) {
+                            self.confirm(kind, false);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -549,6 +567,23 @@ impl App {
                 KeyCode::Char('u') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => p.value.clear(),
                 KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => p.value.push(c),
                 _ => {}
+            },
+            Overlay::Files(p) => match p.handle_key(key) {
+                FileAction::None => {}
+                FileAction::Close => self.overlay = None,
+                FileAction::Open(path) => {
+                    if self.nb.dirty {
+                        let start = p.start.clone();
+                        self.overlay = Some(Overlay::Confirm(ConfirmState {
+                            message: format!("Discard unsaved changes and open {}? [y/n]", path.display()),
+                            kind: ConfirmKind::OpenDiscard { path, reopen: Some(start) },
+                        }));
+                    } else {
+                        self.overlay = None;
+                        self.open_notebook(path);
+                    }
+                }
+                FileAction::PrefsChanged(prefs) => self.picker_prefs = prefs,
             },
             Overlay::Cells(p) => match p.handle_key(key) {
                 PickerAction::None => {}
@@ -576,24 +611,6 @@ impl App {
                     self.overlay = None;
                     self.theme_before_pick = None;
                     self.on_palette_accept(data);
-                }
-                PaletteAction::Parent => {
-                    if let PaletteKind::Files(dir) = &p.kind {
-                        let parent = dir.parent().map(Path::to_path_buf).unwrap_or_else(|| dir.clone());
-                        self.open_browser(parent);
-                    }
-                }
-                PaletteAction::Home => {
-                    if let Some(home) = dirs::home_dir() {
-                        self.open_browser(home);
-                    }
-                }
-                PaletteAction::ToggleHidden => {
-                    if let PaletteKind::Files(dir) = &p.kind {
-                        let dir = dir.clone();
-                        self.show_hidden = !self.show_hidden;
-                        self.open_browser(dir);
-                    }
                 }
             },
         }
@@ -832,7 +849,7 @@ impl App {
                     kind: PromptKind::SaveAs,
                 }));
             }
-            Command::OpenFile => self.open_browser(self.cwd()),
+            Command::OpenFile => self.open_file_picker(self.cwd(), None),
             Command::Reload => {
                 if self.nb.path.is_none() {
                     self.flash("notebook has no file");
@@ -889,6 +906,10 @@ impl App {
     }
 
     fn confirm(&mut self, kind: ConfirmKind, yes: bool) {
+        if let Some((start, path)) = reopen_after(&kind, yes) {
+            self.open_file_picker(start, Some(path));
+            return;
+        }
         match kind {
             ConfirmKind::Quit => {
                 if yes {
@@ -912,7 +933,7 @@ impl App {
                     self.run_cells(&all, true);
                 }
             }
-            ConfirmKind::OpenDiscard(path) => {
+            ConfirmKind::OpenDiscard { path, .. } => {
                 if yes {
                     self.open_notebook(path);
                 }
@@ -1505,44 +1526,30 @@ impl App {
         self.overlay = Some(Overlay::Palette(PaletteState::new(PaletteKind::Commands, "Command palette", items)));
     }
 
-    fn open_browser(&mut self, dir: PathBuf) {
-        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-        let mut dirs_: Vec<PathBuf> = Vec::new();
-        let mut files: Vec<PathBuf> = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                let name = e.file_name().to_string_lossy().into_owned();
-                if !self.show_hidden && name.starts_with('.') {
-                    continue;
-                }
-                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                    || (p.is_dir() && e.file_type().map(|t| t.is_symlink()).unwrap_or(false));
-                if is_dir {
-                    dirs_.push(p);
-                } else if p.extension().map(|x| x == "ipynb").unwrap_or(false) {
-                    files.push(p);
-                }
-            }
-        }
-        dirs_.sort();
-        files.sort();
-        let mut items = Vec::new();
-        if let Some(parent) = dir.parent() {
-            items.push(PaletteItem { label: "../".into(), detail: String::new(), data: ItemData::Dir(parent.to_path_buf()) });
-        }
-        for d in dirs_ {
-            let name = d.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            items.push(PaletteItem { label: format!("{name}/"), detail: String::new(), data: ItemData::Dir(d) });
-        }
-        for f in files {
-            let name = f.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
-            items.push(PaletteItem { label: name, detail: human_size(size), data: ItemData::File(f) });
-        }
-        items.push(PaletteItem { label: "[ new notebook here ]".into(), detail: String::new(), data: ItemData::NewNotebook(dir.clone()) });
-        let title = format!("{}  (Bksp: up · ~: home · ^H: hidden)", shorten_path(&dir, 40));
-        self.overlay = Some(Overlay::Palette(PaletteState::new(PaletteKind::Files(dir), title, items)));
+    fn open_file_picker(&mut self, start: PathBuf, preselect: Option<PathBuf>) {
+        let tx = self.tx.clone();
+        let sink: crate::files::Sink = std::sync::Arc::new(move |ev| {
+            let _ = tx.send(AppEvent::Files(ev));
+        });
+        let io = ThreadIo { worker: PreviewWorker::spawn(sink.clone()), sink };
+        let ui = &self.theme.ui;
+        let ctx = PickerCtx {
+            home: dirs::home_dir(),
+            syn: std::sync::Arc::new(self.theme.syntax.clone()),
+            ui: UiColors { muted: ui.muted, input_bg: ui.input_bg, line_numbers: ui.line_numbers },
+            tab_width: self.cfg.tab_width,
+            icons: self.cfg.icons,
+        };
+        let picker = FilePickerState::new(
+            start,
+            self.nb.path.clone(),
+            self.nb.dirty,
+            preselect,
+            self.picker_prefs,
+            ctx,
+            Box::new(io),
+        );
+        self.overlay = Some(Overlay::Files(Box::new(picker)));
     }
 
     fn on_palette_accept(&mut self, data: ItemData) {
@@ -1557,27 +1564,6 @@ impl App {
                     } else {
                         self.start_kernel(spec);
                     }
-                }
-            }
-            ItemData::Dir(d) => self.open_browser(d),
-            ItemData::File(p) => {
-                if self.nb.dirty {
-                    self.overlay = Some(Overlay::Confirm(ConfirmState {
-                        message: format!("Discard unsaved changes and open {}? [y/n]", p.display()),
-                        kind: ConfirmKind::OpenDiscard(p),
-                    }));
-                } else {
-                    self.open_notebook(p);
-                }
-            }
-            ItemData::NewNotebook(dir) => {
-                if self.nb.dirty {
-                    self.overlay = Some(Overlay::Confirm(ConfirmState {
-                        message: "Discard unsaved changes and create a new notebook? [y/n]".into(),
-                        kind: ConfirmKind::NewDiscard(dir),
-                    }));
-                } else {
-                    self.confirm(ConfirmKind::NewDiscard(dir), true);
                 }
             }
         }
@@ -1922,5 +1908,28 @@ impl App {
         let row = self.layout.row_of(m.cell) + m.row as usize;
         self.scroll_into_view(row, row);
         self.search.current = Some(k);
+    }
+}
+
+/// After "no" to discarding changes for a notebook chosen in the files
+/// picker: the picker's `start` and the chosen path, to reopen the picker
+/// with that file selected.
+fn reopen_after(kind: &ConfirmKind, yes: bool) -> Option<(PathBuf, PathBuf)> {
+    match kind {
+        ConfirmKind::OpenDiscard { path, reopen: Some(start) } if !yes => Some((start.clone(), path.clone())),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reopen_after_declined_discard() {
+        let kind = ConfirmKind::OpenDiscard { path: PathBuf::from("/r/a.ipynb"), reopen: Some(PathBuf::from("/r")) };
+        assert_eq!(reopen_after(&kind, false), Some((PathBuf::from("/r"), PathBuf::from("/r/a.ipynb"))));
+        assert_eq!(reopen_after(&kind, true), None);
+        assert_eq!(reopen_after(&ConfirmKind::NewDiscard(PathBuf::from("/r")), false), None);
     }
 }

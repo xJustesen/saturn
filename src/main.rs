@@ -27,7 +27,7 @@ saturn — keyboard-first TUI Jupyter notebook
 usage: saturn [PATH] [--kernel NAME] [--log FILE]
        saturn theme list | show NAME | import-nvim [--colorscheme NAME] [--name NAME] [--force]
 
-  PATH            notebook (.ipynb) to open, or a directory to browse (default: cwd)
+  PATH            notebook (.ipynb) to open, or a directory to find files in (default: cwd)
   --kernel NAME   kernelspec name to start (overrides the notebook's metadata)
   --log FILE      log file (default: $XDG_CACHE_HOME/saturn/saturn.log)
   -h, --help      show this help
