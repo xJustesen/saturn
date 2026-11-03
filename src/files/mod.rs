@@ -1,6 +1,8 @@
 //! The files picker's listing and previews: root discovery, the scanner and
 //! its ignore rules, and (in `preview`) the preview worker. No drawing code.
 
+pub mod outline;
+pub mod preview;
 pub mod root;
 pub mod skip;
 pub mod walk;
@@ -86,6 +88,11 @@ pub enum FilesEvent {
     Done {
         scan_id: u64,
         summary: ScanSummary,
+    },
+    /// A preview built for the request with this `id`.
+    Preview {
+        id: u64,
+        preview: preview::Preview,
     },
 }
 

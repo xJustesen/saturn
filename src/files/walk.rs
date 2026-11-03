@@ -398,6 +398,7 @@ mod tests {
                     o.entries.extend(entries);
                 }
                 FilesEvent::Done { summary, .. } => o.summary = Some(summary),
+                FilesEvent::Preview { .. } => unreachable!("the scanner sends no previews"),
             }
         });
         out.into_inner()
