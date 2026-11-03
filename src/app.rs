@@ -913,7 +913,6 @@ impl App {
             }
             ConfirmKind::OpenDiscard(path) => {
                 if yes {
-                    self.nb.dirty = false;
                     self.open_notebook(path);
                 }
             }
@@ -929,7 +928,6 @@ impl App {
             }
             ConfirmKind::ReloadDiscard => {
                 if yes && let Some(p) = self.nb.path.clone() {
-                    self.nb.dirty = false;
                     self.open_notebook(p);
                 }
             }
