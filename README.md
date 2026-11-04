@@ -115,14 +115,14 @@ answering no reopens the picker); on any other file it only says that saturn ope
 | `Enter` | open the notebook |
 | `Ctrl+U` | clear the query |
 | `Ctrl+F` / `Ctrl+B` | scroll the preview |
-| `Alt+H` (or `Ctrl+H`) | show hidden files (scans again) |
-| `Alt+I` | show ignored files |
+| `Ctrl+H` | show hidden files (scans again) |
+| `Ctrl+I` | show ignored files |
 | `Esc` | close |
 
-`Alt` keys need the terminal to send Option as Meta (`macos-option-as-alt` in
-Ghostty). Without it, `Ctrl+H` still toggles hidden files, and `show_ignored` in the
-config sets the ignored filter. The file-type icons need a Nerd Font (Ghostty
-includes one); `icons = false` turns them off.
+`Ctrl+I` needs the kitty keyboard protocol (Ghostty, Kitty, WezTerm, foot); other
+terminals send it as `Tab`, so use `Alt+I` there or set `show_ignored` in the config.
+`Alt+H` and `Alt+I` also work when the terminal sends Option as Meta. The file-type
+icons need a Nerd Font (Ghostty includes one); `icons = false` turns them off.
 
 Inside a cell the editor is vim-modal (`hjkl`, `dd`, `yy`, `p`, `ciw`, `v`, `/`, `u`, …).
 `Shift+Enter`, `Ctrl+Enter`, `Alt+Enter`, `Ctrl+S`, `Ctrl+P`, `Ctrl+C` and `Ctrl+Q`
@@ -153,8 +153,8 @@ theme = "tokyo-night"          # see Themes below
 line_numbers = false
 tab_width = 4
 wrap = true
-show_hidden = false            # files picker: list dot-named files and folders (Alt+H)
-show_ignored = false           # files picker: list .gitignored files (Alt+I); notebooks always show
+show_hidden = false            # files picker: list dot-named files and folders (Ctrl+H)
+show_ignored = false           # files picker: list .gitignored files (Ctrl+I); notebooks always show
 icons = true                   # files picker: Nerd Font file-type icons
 ```
 

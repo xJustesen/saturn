@@ -429,7 +429,7 @@ impl FilePickerState {
                 self.rescan();
                 return FileAction::PrefsChanged(self.prefs);
             }
-            KeyCode::Char('i') if alt => {
+            KeyCode::Char('i') if ctrl || alt => {
                 self.prefs.show_ignored = !self.prefs.show_ignored;
                 self.filtered_stale = true;
                 self.user_moved = false;
@@ -711,7 +711,7 @@ fn draw_list(buf: &mut Buffer, r: Rect, p: &mut FilePickerState, theme: &Theme, 
                 .filter(|e| p.fuzzy.score(e.hay.slice(..)).is_some())
                 .count();
             if hidden > 0 {
-                format!("no matches — {hidden} ignored not shown (M-i)")
+                format!("no matches — {hidden} ignored not shown (^I)")
             } else {
                 "no matches".into()
             }
@@ -867,8 +867,8 @@ fn draw_footer(buf: &mut Buffer, r: Rect, p: &FilePickerState, theme: &Theme) {
     }
     let on_off = |b: bool| if b { "on" } else { "off" };
     let mut items = vec![
-        format!("M-h hidden [{}]", on_off(p.prefs.show_hidden)),
-        format!("M-i ignored [{}]", on_off(p.prefs.show_ignored)),
+        format!("^H hidden [{}]", on_off(p.prefs.show_hidden)),
+        format!("^I ignored [{}]", on_off(p.prefs.show_ignored)),
         "^F/^B scroll".to_string(),
         "Esc close".to_string(),
     ];
@@ -1180,7 +1180,7 @@ mod tests {
         t.draw(160, 45);
         assert_eq!(t.p.filtered.len(), 1);
         assert!(
-            matches!(t.mod_key('i', KeyModifiers::ALT), FileAction::PrefsChanged(p) if p.show_ignored)
+            matches!(t.mod_key('i', KeyModifiers::CONTROL), FileAction::PrefsChanged(p) if p.show_ignored)
         );
         t.draw(160, 45);
         assert_eq!(t.p.filtered.len(), 2);
@@ -1194,7 +1194,7 @@ mod tests {
         t.typed("a");
         let first = t.scan_id();
         assert!(
-            matches!(t.mod_key('h', KeyModifiers::ALT), FileAction::PrefsChanged(p) if p.show_hidden)
+            matches!(t.mod_key('h', KeyModifiers::CONTROL), FileAction::PrefsChanged(p) if p.show_hidden)
         );
         let scans = t.scans();
         assert_eq!(scans.len(), 2);
@@ -1203,8 +1203,8 @@ mod tests {
         assert!(scans[0].cancel.load(Ordering::Relaxed));
         assert_eq!(t.p.query, "a");
         assert!(t.p.entries.is_empty());
-        // Ctrl+H does the same.
-        t.mod_key('h', KeyModifiers::CONTROL);
+        // Alt+H still does the same.
+        t.mod_key('h', KeyModifiers::ALT);
         assert!(!t.scans()[2].prefs.show_hidden);
     }
 
@@ -1310,7 +1310,7 @@ mod tests {
             entries: vec![entry("a.py", false), entry("data.csv", true)],
         });
         t.typed("csv");
-        assert!(text(&t.draw(160, 45)).contains("no matches — 1 ignored not shown (M-i)"));
+        assert!(text(&t.draw(160, 45)).contains("no matches — 1 ignored not shown (^I)"));
     }
 
     #[test]
@@ -1361,7 +1361,7 @@ mod tests {
         let buf = t.draw(120, 30);
         let s = text(&buf);
         assert!(s.contains(" Recent notebooks "), "{s}");
-        assert!(!s.contains("M-h"), "{s}");
+        assert!(!s.contains("^H"), "{s}");
         assert!(!s.contains("scanning"), "{s}");
         let rz = s.find("~/w/z.ipynb").unwrap();
         let ra = s.find("~/w/a.ipynb").unwrap();
@@ -1382,6 +1382,7 @@ mod tests {
         assert!(matches!(t.mod_key('h', KeyModifiers::ALT), FileAction::None));
         assert!(matches!(t.mod_key('h', KeyModifiers::CONTROL), FileAction::None));
         assert!(matches!(t.mod_key('i', KeyModifiers::ALT), FileAction::None));
+        assert!(matches!(t.mod_key('i', KeyModifiers::CONTROL), FileAction::None));
         assert!(t.scans().is_empty());
         t.typed("a.ip");
         match t.key(KeyCode::Enter) {

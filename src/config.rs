@@ -31,10 +31,10 @@ pub struct Config {
     pub tab_width: usize,
     /// Wrap long lines in cells.
     pub wrap: bool,
-    /// Files picker: list hidden files and folders (dot names). Toggle with Alt+H.
+    /// Files picker: list hidden files and folders (dot names). Toggle with Ctrl+H.
     pub show_hidden: bool,
     /// Files picker: list files matched by .gitignore. Notebooks are always
-    /// listed. Toggle with Alt+I.
+    /// listed. Toggle with Ctrl+I.
     pub show_ignored: bool,
     /// Files picker: show Nerd Font file-type icons. Needs a Nerd Font, which
     /// Ghostty includes.
