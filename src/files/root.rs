@@ -22,24 +22,10 @@ pub struct Repo {
 pub fn find_root(start: &Path) -> RootInfo {
     let start = fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
     for dir in start.ancestors() {
-        let git = dir.join(".git");
-        let Ok(meta) = fs::metadata(&git) else {
-            continue;
-        };
-        let common_dir = if meta.is_dir() {
-            Some(git)
-        } else if meta.is_file() {
-            common_dir_from_file(dir, &git)
-        } else {
-            None
-        };
-        if let Some(common_dir) = common_dir {
+        if let Some(repo) = repo_at(dir) {
             return RootInfo {
                 root: dir.to_path_buf(),
-                repo: Some(Repo {
-                    work_tree: dir.to_path_buf(),
-                    common_dir,
-                }),
+                repo: Some(repo),
             };
         }
     }
@@ -47,6 +33,24 @@ pub fn find_root(start: &Path) -> RootInfo {
         root: start,
         repo: None,
     }
+}
+
+/// The repository whose work tree is exactly `dir`: it holds a `.git` folder,
+/// or a `.git` file with a usable `gitdir:` line.
+pub fn repo_at(dir: &Path) -> Option<Repo> {
+    let git = dir.join(".git");
+    let meta = fs::metadata(&git).ok()?;
+    let common_dir = if meta.is_dir() {
+        Some(git)
+    } else if meta.is_file() {
+        common_dir_from_file(dir, &git)
+    } else {
+        None
+    }?;
+    Some(Repo {
+        work_tree: dir.to_path_buf(),
+        common_dir,
+    })
 }
 
 /// Follow a `.git` file's `gitdir:` line, then the gitdir's `commondir` file.
@@ -131,5 +135,18 @@ mod tests {
         fs::write(d.join("sub/.git"), "not a gitdir line\n").unwrap();
         let info = find_root(&d.join("sub"));
         assert_eq!(info.root, canon(&d));
+    }
+
+    #[test]
+    fn repo_at_checks_only_the_folder_itself() {
+        let d = scratch_dir("root-repo-at");
+        fs::create_dir(d.join(".git")).unwrap();
+        fs::create_dir_all(d.join("sub")).unwrap();
+        assert_eq!(repo_at(&d).unwrap().work_tree, d);
+        assert!(repo_at(&d.join("sub")).is_none());
+        fs::write(d.join("sub/.git"), "junk\n").unwrap();
+        assert!(repo_at(&d.join("sub")).is_none());
+        fs::write(d.join("sub/.git"), format!("gitdir: {}\n", d.join(".git").display())).unwrap();
+        assert!(repo_at(&d.join("sub")).is_some());
     }
 }

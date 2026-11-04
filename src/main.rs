@@ -27,7 +27,8 @@ saturn — keyboard-first TUI Jupyter notebook
 usage: saturn [PATH] [--kernel NAME] [--log FILE]
        saturn theme list | show NAME | import-nvim [--colorscheme NAME] [--name NAME] [--force]
 
-  PATH            notebook (.ipynb) to open, or a directory to find files in (default: cwd)
+  PATH            notebook (.ipynb) to open, or a directory to find files in
+                  (default: the start dashboard)
   --kernel NAME   kernelspec name to start (overrides the notebook's metadata)
   --log FILE      log file (default: $XDG_CACHE_HOME/saturn/saturn.log)
   -h, --help      show this help
@@ -75,7 +76,7 @@ static KBD_ENHANCED: AtomicBool = AtomicBool::new(false);
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 fn parse_args() -> Result<Opts> {
-    let mut opts = Opts::default();
+    let mut opts = Opts { started: Some(std::time::Instant::now()), ..Opts::default() };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {

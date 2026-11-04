@@ -411,15 +411,25 @@ impl Ui {
 /// background but not the background". `None` when `bg` is not RGB.
 fn shade_toward(bg: Color, fg: Color) -> Option<Color> {
     let Color::Rgb(r, g, b) = bg else { return None };
-    let mix = |c: u8, t: u8| -> u8 { ((c as i32 * 92 + t as i32 * 8) / 100) as u8 };
-    Some(match fg {
-        Color::Rgb(fr, fg_, fb) => Color::Rgb(mix(r, fr), mix(g, fg_), mix(b, fb)),
+    let toward = match fg {
+        Color::Rgb(..) => fg,
         _ => {
             let lum = (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000;
             let t = if lum < 128 { 255 } else { 0 };
-            Color::Rgb(mix(r, t), mix(g, t), mix(b, t))
+            Color::Rgb(t, t, t)
         }
-    })
+    };
+    mix(bg, toward, 8)
+}
+
+/// `a` moved `pct` percent of the way toward `b`. `None` unless both are RGB.
+pub fn mix(a: Color, b: Color, pct: u8) -> Option<Color> {
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
+        return None;
+    };
+    let p = pct.min(100) as i32;
+    let m = |x: u8, y: u8| -> u8 { ((x as i32 * (100 - p) + y as i32 * p) / 100) as u8 };
+    Some(Color::Rgb(m(ar, br), m(ag, bg), m(ab, bb)))
 }
 
 /// A loaded theme: UI colors plus a syntect theme for code.

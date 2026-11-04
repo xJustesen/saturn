@@ -8,6 +8,7 @@ pub mod files;
 pub mod keymap;
 pub mod kernel;
 pub mod notebook;
+pub mod recent;
 pub mod render;
 pub mod search;
 pub mod syntax;
@@ -22,4 +23,6 @@ pub struct Opts {
     pub path: Option<PathBuf>,
     pub kernel: Option<String>,
     pub log: Option<PathBuf>,
+    /// When `main` started, for the dashboard's "ready in" figure.
+    pub started: Option<std::time::Instant>,
 }

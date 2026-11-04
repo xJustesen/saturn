@@ -132,6 +132,8 @@ pub struct FilePickerState {
     notice: Option<(String, Instant)>,
     stale_drops: u32,
     ctx: PickerCtx,
+    /// Fixed-list mode (recent notebooks): the title, and no scanning.
+    fixed: Option<String>,
 }
 
 impl FilePickerState {
@@ -144,7 +146,40 @@ impl FilePickerState {
         ctx: PickerCtx,
         io: Box<dyn PickerIo>,
     ) -> Self {
-        let p = FilePickerState {
+        let p = Self::blank(start, open_path, open_dirty, preselect, prefs, ctx, io);
+        p.send_scan();
+        p
+    }
+
+    /// A picker over `entries` as given (in that order when the query is
+    /// empty), with no scan: the recent-notebooks list.
+    pub fn fixed(
+        title: String,
+        entries: Vec<FileEntry>,
+        open_path: Option<PathBuf>,
+        open_dirty: bool,
+        ctx: PickerCtx,
+        io: Box<dyn PickerIo>,
+    ) -> Self {
+        let start = ctx.home.clone().unwrap_or_else(|| PathBuf::from("/"));
+        let mut p = Self::blank(start, open_path, open_dirty, None, PickerPrefs::default(), ctx, io);
+        p.fixed = Some(title);
+        p.entries = entries;
+        p.scanning = false;
+        p.summary = Some(ScanSummary::default());
+        p
+    }
+
+    fn blank(
+        start: PathBuf,
+        open_path: Option<PathBuf>,
+        open_dirty: bool,
+        preselect: Option<PathBuf>,
+        prefs: PickerPrefs,
+        ctx: PickerCtx,
+        io: Box<dyn PickerIo>,
+    ) -> Self {
+        FilePickerState {
             io,
             start,
             root: None,
@@ -178,9 +213,8 @@ impl FilePickerState {
             notice: None,
             stale_drops: 0,
             ctx,
-        };
-        p.send_scan();
-        p
+            fixed: None,
+        }
     }
 
     fn send_scan(&self) {
@@ -390,6 +424,7 @@ impl FilePickerState {
             }
             KeyCode::Char('f') if ctrl => self.scroll_preview(true),
             KeyCode::Char('b') if ctrl => self.scroll_preview(false),
+            KeyCode::Char('h') | KeyCode::Char('i') if (ctrl || alt) && self.fixed.is_some() => {}
             KeyCode::Char('h') if ctrl || alt => {
                 self.rescan();
                 return FileAction::PrefsChanged(self.prefs);
@@ -564,7 +599,10 @@ pub fn render(buf: &mut Buffer, area: Rect, p: &mut FilePickerState, theme: &The
     let title_w = a.popup.width.saturating_sub(6) as usize;
     let root = p.root.as_deref().unwrap_or(&p.start);
     let root_text = clean_name(&root.to_string_lossy()).into_owned();
-    let title = format!(" {} ", shorten_path(Path::new(&root_text), title_w));
+    let title = match &p.fixed {
+        Some(t) => format!(" {} ", cut(t, title_w)),
+        None => format!(" {} ", shorten_path(Path::new(&root_text), title_w)),
+    };
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -657,7 +695,9 @@ fn draw_list(buf: &mut Buffer, r: Rect, p: &mut FilePickerState, theme: &Theme, 
         return;
     }
     if p.filtered.is_empty() {
-        let msg = if p.scan_failed {
+        let msg = if p.fixed.is_some() && p.entries.is_empty() {
+            "no recent notebooks yet".to_string()
+        } else if p.scan_failed {
             "cannot start scan".to_string()
         } else if p.entries.is_empty() && p.summary.is_some() {
             format!("no files under {root_text} — Esc, then Ctrl+P → New notebook")
@@ -826,12 +866,15 @@ fn draw_footer(buf: &mut Buffer, r: Rect, p: &FilePickerState, theme: &Theme) {
         return;
     }
     let on_off = |b: bool| if b { "on" } else { "off" };
-    let items = [
+    let mut items = vec![
         format!("M-h hidden [{}]", on_off(p.prefs.show_hidden)),
         format!("M-i ignored [{}]", on_off(p.prefs.show_ignored)),
         "^F/^B scroll".to_string(),
         "Esc close".to_string(),
     ];
+    if p.fixed.is_some() {
+        items.drain(..2);
+    }
     let max = r.width.saturating_sub(1) as usize;
     let mut line = String::new();
     for item in items {
@@ -1285,5 +1328,72 @@ mod tests {
             .map(|(c, _)| c)
             .collect();
         assert_eq!(s, "long_…");
+    }
+
+    fn fixed_picker(paths: &[&str]) -> T {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let io = RecordIo {
+            calls: calls.clone(),
+        };
+        let entries = paths
+            .iter()
+            .map(|p| FileEntry::new(PathBuf::from(p), format!("~{p}"), false))
+            .collect();
+        let p = FilePickerState::fixed(
+            "Recent notebooks".into(),
+            entries,
+            None,
+            false,
+            ctx(true),
+            Box::new(io),
+        );
+        T {
+            p,
+            calls,
+            theme: Theme::load("tokyo-night").unwrap(),
+        }
+    }
+
+    #[test]
+    fn fixed_mode_lists_entries_in_order_without_scanning() {
+        let mut t = fixed_picker(&["/w/z.ipynb", "/w/a.ipynb", "/x/m.ipynb"]);
+        assert!(t.scans().is_empty());
+        let buf = t.draw(120, 30);
+        let s = text(&buf);
+        assert!(s.contains(" Recent notebooks "), "{s}");
+        assert!(!s.contains("M-h"), "{s}");
+        assert!(!s.contains("scanning"), "{s}");
+        let rz = s.find("~/w/z.ipynb").unwrap();
+        let ra = s.find("~/w/a.ipynb").unwrap();
+        assert!(rz < ra);
+        assert_eq!(t.selected_display().as_deref(), Some("~/w/z.ipynb"));
+        // Previews still go out, with the absolute path.
+        let calls = t.calls.borrow();
+        let req = calls.iter().find_map(|c| match c {
+            IoCall::Preview(r) => Some(r),
+            _ => None,
+        });
+        assert_eq!(req.unwrap().path, PathBuf::from("/w/z.ipynb"));
+    }
+
+    #[test]
+    fn fixed_mode_ignores_rescan_keys_and_opens_absolute_paths() {
+        let mut t = fixed_picker(&["/w/z.ipynb", "/w/a.ipynb"]);
+        assert!(matches!(t.mod_key('h', KeyModifiers::ALT), FileAction::None));
+        assert!(matches!(t.mod_key('h', KeyModifiers::CONTROL), FileAction::None));
+        assert!(matches!(t.mod_key('i', KeyModifiers::ALT), FileAction::None));
+        assert!(t.scans().is_empty());
+        t.typed("a.ip");
+        match t.key(KeyCode::Enter) {
+            FileAction::Open(p) => assert_eq!(p, PathBuf::from("/w/a.ipynb")),
+            _ => panic!("expected Open"),
+        }
+    }
+
+    #[test]
+    fn fixed_mode_empty_list_message() {
+        let mut t = fixed_picker(&[]);
+        let s = text(&t.draw(120, 30));
+        assert!(s.contains("no recent notebooks yet"), "{s}");
     }
 }

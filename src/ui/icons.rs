@@ -26,6 +26,31 @@ const TEXT: char = '\u{f0f6}'; // nf-fa-file_text_o
 const IMAGE: char = '\u{f1c5}'; // nf-fa-file_image_o
 const PDF: char = '\u{f1c1}'; // nf-fa-file_pdf_o
 const FILE: char = '\u{f016}'; // nf-fa-file_o
+const SEARCH: char = '\u{f002}'; // nf-fa-search
+const REPO: char = '\u{f401}'; // nf-oct-repo
+const HISTORY: char = '\u{f1da}'; // nf-fa-history
+const PAINTBRUSH: char = '\u{f1fc}'; // nf-fa-paintbrush
+const POWER: char = '\u{f011}'; // nf-fa-power_off
+
+/// The dashboard's menu icon: a Nerd Font glyph, or a plain single-width
+/// symbol when icons are off.
+pub fn dash_icon(item: crate::ui::dashboard::DashItem, nerd: bool) -> char {
+    use crate::ui::dashboard::DashItem::*;
+    match (item, nerd) {
+        (FindFiles, true) => SEARCH,
+        (NewNotebook, true) => NOTEBOOK,
+        (Projects, true) => REPO,
+        (Recent, true) => HISTORY,
+        (Theme, true) => PAINTBRUSH,
+        (Quit, true) => POWER,
+        (FindFiles, false) => '»',
+        (NewNotebook, false) => '+',
+        (Projects, false) => '▸',
+        (Recent, false) => '↺',
+        (Theme, false) => '◐',
+        (Quit, false) => '×',
+    }
+}
 
 /// The icon and its colour for a file name: notebooks first, then whole
 /// names (`README*` and `LICENSE*` as prefixes), then the lowercased
@@ -73,7 +98,8 @@ mod tests {
 
     const ALL: &[char] = &[
         NOTEBOOK, PYTHON, RUST, JAVASCRIPT, TYPESCRIPT, SHELL, DATABASE, CODE, CONFIG, LOCK,
-        MAKEFILE, DOCKER, GIT, TABLE, ARCHIVE, MARKDOWN, TEXT, IMAGE, PDF, FILE,
+        MAKEFILE, DOCKER, GIT, TABLE, ARCHIVE, MARKDOWN, TEXT, IMAGE, PDF, FILE, SEARCH, REPO,
+        HISTORY, PAINTBRUSH, POWER,
     ];
 
     #[test]

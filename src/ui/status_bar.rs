@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, Screen};
 use crate::kernel::KernelStatus;
 
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
@@ -44,6 +44,20 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
             }
         }
     };
+    if matches!(app.screen, Screen::Dashboard(_)) {
+        let mut left = vec![Span::styled(" HOME ", mode(" HOME ", ui.mode_command).1), Span::raw(" ")];
+        if let Some(f) = &app.flash {
+            let st = if f.error { t.error() } else { Style::default().fg(ui.info) };
+            left.push(Span::styled(f.text.clone(), st));
+        }
+        let right = Line::from(Span::styled(format!("  {} ", app.graphics_label), t.muted()));
+        let rw = right.width() as u16;
+        buf.set_line(area.x, area.y, &Line::from(left), area.width.saturating_sub(rw + 1));
+        if rw < area.width {
+            buf.set_line(area.x + area.width - rw, area.y, &right, rw);
+        }
+        return;
+    }
     let mut left: Vec<Span> = vec![Span::styled(mode_label, mode_style), Span::raw(" ")];
     if let Some(inp) = &app.search.input {
         // The prompt takes the line, like vim's command line.

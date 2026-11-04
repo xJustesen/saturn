@@ -61,6 +61,7 @@ pub enum Command {
     OpenFile,
     Reload,
     NewNotebook,
+    Dashboard,
     // ui
     CommandPalette,
     Help,
@@ -114,6 +115,7 @@ pub const PALETTE: &[CommandInfo] = &[
     CommandInfo { cmd: Command::SaveAs, name: "Save notebook as…", keys: "" },
     CommandInfo { cmd: Command::OpenFile, name: "Find file…", keys: "Ctrl+O" },
     CommandInfo { cmd: Command::NewNotebook, name: "New notebook", keys: "" },
+    CommandInfo { cmd: Command::Dashboard, name: "Dashboard", keys: "" },
     CommandInfo { cmd: Command::Reload, name: "Reload notebook from disk", keys: "" },
     CommandInfo { cmd: Command::ToggleLineNumbers, name: "Toggle line numbers", keys: "" },
     CommandInfo { cmd: Command::ToggleWrap, name: "Toggle line wrap", keys: "" },

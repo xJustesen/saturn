@@ -2,6 +2,8 @@
 
 pub mod cell;
 pub mod cell_picker;
+pub mod dashboard;
+pub mod dashboard_logo;
 pub mod file_picker;
 pub mod fuzzy;
 pub mod icons;
@@ -15,7 +17,7 @@ pub mod text;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 
-use crate::app::App;
+use crate::app::{App, Screen};
 use crate::ui::overlay::Overlay;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -40,6 +42,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let App { theme, overlay, .. } = app;
         let Some(Overlay::Files(p)) = overlay else { return };
         file_picker::render(buf, main, p, theme);
+        return;
+    }
+    if let Screen::Dashboard(d) = &app.screen {
+        let info = dashboard::DashInfo {
+            version: env!("CARGO_PKG_VERSION"),
+            kernels: app.kernelspecs.as_ref().map(Vec::len),
+            ready: app.ready_in,
+            icons: app.cfg.icons,
+        };
+        dashboard::render(buf, main, d, &info, &app.theme);
+        status_bar::render(buf, status, app);
+        if let Some(ov) = &mut app.overlay {
+            overlay::render(buf, area, ov, &app.theme);
+        }
         return;
     }
     notebook_view::render(buf, main, app);

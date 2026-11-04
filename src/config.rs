@@ -39,6 +39,9 @@ pub struct Config {
     /// Files picker: show Nerd Font file-type icons. Needs a Nerd Font, which
     /// Ghostty includes.
     pub icons: bool,
+    /// Dashboard "Projects": folders searched (a few levels deep) for git
+    /// repositories. `~` is expanded; folders that don't exist are skipped.
+    pub project_roots: Vec<String>,
 }
 
 impl Default for Config {
@@ -56,6 +59,9 @@ impl Default for Config {
             show_hidden: false,
             show_ignored: false,
             icons: true,
+            project_roots: ["~/dev", "~/code", "~/projects", "~/src"]
+                .map(String::from)
+                .to_vec(),
         }
     }
 }
@@ -72,7 +78,38 @@ pub fn config_root() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("saturn"))
 }
 
+/// `$XDG_STATE_HOME/saturn`, else `~/.local/state/saturn` (on macOS too, like
+/// [`config_root`]). Holds the recent-notebooks list.
+pub fn state_root() -> Option<PathBuf> {
+    if let Some(x) = std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(x).join("saturn"));
+    }
+    dirs::home_dir().map(|h| h.join(".local").join("state").join("saturn"))
+}
+
+/// `~` or `~/rest` with the home folder filled in; anything else unchanged.
+pub fn expand_tilde(s: &str) -> PathBuf {
+    let home = dirs::home_dir();
+    match (s, home) {
+        ("~", Some(h)) => h,
+        (s, Some(h)) if s.starts_with("~/") => h.join(&s[2..]),
+        (s, _) => PathBuf::from(s),
+    }
+}
+
 impl Config {
+    /// `project_roots` with `~` expanded, in order, without duplicates.
+    pub fn project_root_paths(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for r in &self.project_roots {
+            let p = expand_tilde(r);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
     pub fn path() -> Option<PathBuf> {
         let p = config_root()?.join("config.toml");
         if p.exists() {
@@ -157,6 +194,25 @@ mod tests {
         assert!(!cfg.show_hidden && !cfg.show_ignored && cfg.icons);
         let cfg: Config = toml::from_str("icons = false\nshow_ignored = true\n").unwrap();
         assert!(!cfg.icons && cfg.show_ignored);
+    }
+
+    #[test]
+    fn project_roots_default_and_parse() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.project_roots, ["~/dev", "~/code", "~/projects", "~/src"]);
+        let cfg: Config = toml::from_str("project_roots = [\"~/work\", \"/opt/repos\", \"~/work\"]\n").unwrap();
+        let paths = cfg.project_root_paths();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[1], PathBuf::from("/opt/repos"));
+    }
+
+    #[test]
+    fn expand_tilde_fills_in_home() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("~/dev"), home.join("dev"));
+        assert_eq!(expand_tilde("/abs"), PathBuf::from("/abs"));
+        assert_eq!(expand_tilde("~user/x"), PathBuf::from("~user/x"));
     }
 
     #[test]

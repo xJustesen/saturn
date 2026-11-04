@@ -3,6 +3,7 @@
 
 pub mod outline;
 pub mod preview;
+pub mod projects;
 pub mod root;
 pub mod skip;
 pub mod walk;
@@ -31,6 +32,25 @@ pub struct FileEntry {
     pub ignored: bool,
     /// The name ends in `.ipynb`.
     pub notebook: bool,
+}
+
+impl FileEntry {
+    /// An entry for a path found some other way than the scanner (the
+    /// recent-notebooks list). `display` is shown and matched as is.
+    pub fn new(path: PathBuf, display: String, ignored: bool) -> Self {
+        let name_at = display.rfind('/').map_or(0, |i| i + 1) as u32;
+        let notebook = path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(".ipynb"));
+        FileEntry {
+            path,
+            hay: Utf32String::from(display.as_str()),
+            display: display.into_boxed_str(),
+            name_at,
+            ignored,
+            notebook,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -123,13 +143,21 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-pub fn shorten_path(p: &Path, max: usize) -> String {
-    let mut s = p.display().to_string();
-    if let Some(home) = dirs::home_dir()
-        && let Ok(rest) = p.strip_prefix(&home)
+/// `p` with the home folder written as `~`.
+pub fn tilde(p: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home
+        && let Ok(rest) = p.strip_prefix(home)
     {
-        s = format!("~/{}", rest.display());
+        if rest.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", rest.display());
     }
+    p.display().to_string()
+}
+
+pub fn shorten_path(p: &Path, max: usize) -> String {
+    let s = tilde(p, dirs::home_dir().as_deref());
     if s.chars().count() <= max {
         return s;
     }
@@ -156,4 +184,29 @@ pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tilde_shortens_paths_under_home() {
+        let home = Path::new("/Users/me");
+        assert_eq!(tilde(Path::new("/Users/me/dev/x"), Some(home)), "~/dev/x");
+        assert_eq!(tilde(Path::new("/Users/me"), Some(home)), "~");
+        assert_eq!(tilde(Path::new("/opt/x"), Some(home)), "/opt/x");
+        assert_eq!(tilde(Path::new("/Users/me/x"), None), "/Users/me/x");
+    }
+
+    #[test]
+    fn file_entry_new_finds_name_and_kind() {
+        let e = FileEntry::new(PathBuf::from("/a/b/nb.ipynb"), "~/b/nb.ipynb".into(), false);
+        assert_eq!(&e.display[e.name_at as usize..], "nb.ipynb");
+        assert!(e.notebook);
+        let e = FileEntry::new(PathBuf::from("/a/x.py"), "x.py".into(), true);
+        assert_eq!(e.name_at, 0);
+        assert!(!e.notebook);
+        assert!(e.ignored);
+    }
 }

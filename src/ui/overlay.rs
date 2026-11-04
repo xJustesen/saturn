@@ -75,6 +75,8 @@ pub enum ConfirmKind {
     OpenDiscard { path: PathBuf, reopen: Option<PathBuf> },
     NewDiscard(PathBuf),
     ReloadDiscard,
+    /// Close the notebook and go back to the start dashboard.
+    DashboardDiscard,
 }
 
 pub struct ConfirmState {
@@ -87,6 +89,8 @@ pub enum ItemData {
     Command(Command),
     Kernel(usize),
     Theme(String),
+    /// A repository from the dashboard's Projects list.
+    Project(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +105,7 @@ pub enum PaletteKind {
     Commands,
     Kernels,
     Themes,
+    Projects,
 }
 
 pub struct PaletteState {
@@ -145,6 +150,12 @@ impl PaletteState {
             self.filtered = ranked.into_iter().map(|i| i as usize).collect();
         }
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+    }
+
+    /// Replace the items (a list that arrived later), keeping the query.
+    pub fn set_items(&mut self, items: Vec<PaletteItem>) {
+        self.items = items;
+        self.filter();
     }
 
     pub fn selected_item(&self) -> Option<&PaletteItem> {
@@ -258,7 +269,9 @@ fn render_palette(buf: &mut Buffer, area: Rect, p: &PaletteState, theme: &Theme)
         if detail_w > 0 {
             let detail_x = list.x + list.width - detail_w;
             let detail_st = if selected && theme.ui.match_fg.is_some() { st } else { st.fg(theme.ui.muted) };
-            buf.set_string(detail_x, y, &item.detail, detail_st);
+            // Long details (paths) keep their end, and stay inside the border.
+            let detail = crate::ui::text::cut_left(&item.detail, detail_w as usize);
+            buf.set_stringn(detail_x, y, detail, detail_w as usize, detail_st);
         }
     }
     if p.filtered.is_empty() {

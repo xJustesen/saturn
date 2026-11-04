@@ -20,7 +20,8 @@ use crate::commands::{Command, PALETTE};
 use crate::config::Config;
 use crate::theme::Theme;
 use crate::editor::{CellEditor, language_extension};
-use crate::files::PickerPrefs;
+use crate::files::projects::Project;
+use crate::files::{FileEntry, PickerPrefs};
 use crate::files::preview::{PreviewWorker, UiColors};
 use crate::kernel::{KernelCommand, KernelEvent, KernelHandle, KernelStatus, ReplyStatus, startup};
 use crate::keymap::{self, Key, KeyAction};
@@ -29,10 +30,12 @@ use crate::notebook::{Cell, CellKind, ExecState, Notebook, Output, io as nbio};
 use crate::render::RenderCache;
 use crate::render::image::ImageStore;
 use crate::render::plotly::PlotlySidecar;
+use crate::recent::Recent;
 use crate::search::{self, Match, SearchInput, SearchState};
 use crate::ui;
 use crate::ui::cell::content_width;
 use crate::ui::cell_picker::{CellPickerState, PickerAction};
+use crate::ui::dashboard::{DashAction, DashItem, DashboardState};
 use crate::ui::layout::LayoutCache;
 use crate::ui::file_picker::{FileAction, FilePickerState, PickerCtx, ThreadIo};
 use crate::ui::overlay::{
@@ -50,6 +53,8 @@ pub enum AppEvent {
     Kernelspecs(Vec<KernelspecDir>),
     /// From the files picker's scanner and preview worker.
     Files(crate::files::FilesEvent),
+    /// The dashboard's projects scan finished.
+    Projects(Vec<Project>),
     Tick,
 }
 
@@ -57,6 +62,12 @@ pub enum AppEvent {
 pub enum Mode {
     Command,
     Edit,
+}
+
+/// What sits under the overlays: the start dashboard or the notebook.
+pub enum Screen {
+    Dashboard(DashboardState),
+    Notebook,
 }
 
 pub struct Flash {
@@ -69,6 +80,7 @@ const FLASH_SECS: u64 = 5;
 const SCROLL_MARGIN: usize = 2;
 
 pub struct App {
+    pub screen: Screen,
     pub nb: Notebook,
     pub mode: Mode,
     pub focused: usize,
@@ -102,6 +114,12 @@ pub struct App {
     rx: UnboundedReceiver<AppEvent>,
     dirty_ui: bool,
     quit: bool,
+    recent_path: Option<PathBuf>,
+    projects: Option<Vec<Project>>,
+    projects_scanning: bool,
+    started: Option<Instant>,
+    /// Startup to the first frame, for the dashboard footer.
+    pub ready_in: Option<Duration>,
 }
 
 impl App {
@@ -123,6 +141,7 @@ impl App {
             }
         };
         let mut app = App {
+            screen: Screen::Notebook,
             nb: Notebook::empty(),
             mode: Mode::Command,
             focused: 0,
@@ -155,6 +174,11 @@ impl App {
             rx,
             dirty_ui: true,
             quit: false,
+            recent_path: crate::recent::default_path(),
+            projects: None,
+            projects_scanning: false,
+            started: opts.started,
+            ready_in: None,
         };
         {
             let tx = app.tx.clone();
@@ -178,7 +202,7 @@ impl App {
                     }
                 }
             }
-            None => app.open_file_picker(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), None),
+            None => app.show_dashboard(),
         }
         Ok(app)
     }
@@ -221,6 +245,14 @@ impl App {
             if self.dirty_ui {
                 let t0 = Instant::now();
                 terminal.draw(|f| ui::draw(f, &mut self))?;
+                if let Some(s) = self.started.take() {
+                    self.ready_in = Some(s.elapsed());
+                    // The footer shows the figure from the next frame on.
+                    self.dirty_ui = true;
+                    let dt = t0.elapsed();
+                    tracing::debug!("first frame after {:?} (draw {dt:?})", self.ready_in);
+                    continue;
+                }
                 let dt = t0.elapsed();
                 if dt > Duration::from_millis(8) {
                     tracing::debug!("slow frame: {dt:?}");
@@ -307,6 +339,20 @@ impl App {
                     && p.kind == PaletteKind::Kernels
                 {
                     self.open_kernel_picker();
+                }
+                self.dirty_ui = true;
+            }
+            AppEvent::Projects(list) => {
+                self.projects = Some(list);
+                self.projects_scanning = false;
+                if let Some(Overlay::Palette(p)) = &self.overlay
+                    && p.kind == PaletteKind::Projects
+                {
+                    let (title, items) = self.project_items();
+                    if let Some(Overlay::Palette(p)) = &mut self.overlay {
+                        p.title = title;
+                        p.set_items(items);
+                    }
                 }
                 self.dirty_ui = true;
             }
@@ -464,6 +510,11 @@ impl App {
             self.on_overlay_key(key);
             return;
         }
+        if let Screen::Dashboard(d) = &mut self.screen {
+            let action = d.handle_key(key);
+            self.on_dash(action);
+            return;
+        }
         if self.search.input.is_some() {
             self.on_search_key(key);
             return;
@@ -572,7 +623,9 @@ impl App {
                 FileAction::None => {}
                 FileAction::Close => self.overlay = None,
                 FileAction::Open(path) => {
-                    if self.nb.dirty {
+                    // The dashboard's placeholder notebook holds nothing to lose.
+                    let home = matches!(self.screen, Screen::Dashboard(_));
+                    if self.nb.dirty && !home {
                         let start = p.start.clone();
                         self.overlay = Some(Overlay::Confirm(ConfirmState {
                             message: format!("Discard unsaved changes and open {}? [y/n]", path.display()),
@@ -873,6 +926,19 @@ impl App {
                     self.confirm(ConfirmKind::NewDiscard(dir), true);
                 }
             }
+            Command::Dashboard => {
+                if self.mode == Mode::Edit {
+                    self.leave_edit();
+                }
+                if self.nb.dirty {
+                    self.overlay = Some(Overlay::Confirm(ConfirmState {
+                        message: "Discard unsaved changes and return to the dashboard? [y/n]".into(),
+                        kind: ConfirmKind::DashboardDiscard,
+                    }));
+                } else {
+                    self.show_dashboard();
+                }
+            }
             Command::CommandPalette => self.open_command_palette(),
             Command::Help => self.overlay = Some(Overlay::Help),
             Command::ToggleLineNumbers => {
@@ -951,6 +1017,11 @@ impl App {
             ConfirmKind::ReloadDiscard => {
                 if yes && let Some(p) = self.nb.path.clone() {
                     self.open_notebook(p);
+                }
+            }
+            ConfirmKind::DashboardDiscard => {
+                if yes {
+                    self.show_dashboard();
                 }
             }
         }
@@ -1239,12 +1310,13 @@ impl App {
                 }
             }
             KernelEvent::Ready { implementation, language, version } => {
-                if let Some(k) = &mut self.kernel {
-                    k.status = KernelStatus::Idle;
-                    k.language = language.clone();
-                    if let Some(code) = startup::startup_code(&language) {
-                        k.send(KernelCommand::ExecuteSilent { code });
-                    }
+                // A kernel shut down while starting (the notebook was closed)
+                // can still report in; it must not touch the notebook now open.
+                let Some(k) = &mut self.kernel else { return };
+                k.status = KernelStatus::Idle;
+                k.language = language.clone();
+                if let Some(code) = startup::startup_code(&language) {
+                    k.send(KernelCommand::ExecuteSilent { code });
                 }
                 self.lang_ext = language_extension(&language).to_string();
                 self.nb.set_language_info(&language, &version);
@@ -1526,7 +1598,8 @@ impl App {
         self.overlay = Some(Overlay::Palette(PaletteState::new(PaletteKind::Commands, "Command palette", items)));
     }
 
-    fn open_file_picker(&mut self, start: PathBuf, preselect: Option<PathBuf>) {
+    /// What every files picker needs: its context and its worker threads.
+    fn picker_parts(&self) -> (PickerCtx, Box<ThreadIo>) {
         let tx = self.tx.clone();
         let sink: crate::files::Sink = std::sync::Arc::new(move |ev| {
             let _ = tx.send(AppEvent::Files(ev));
@@ -1540,6 +1613,11 @@ impl App {
             tab_width: self.cfg.tab_width,
             icons: self.cfg.icons,
         };
+        (ctx, Box::new(io))
+    }
+
+    fn open_file_picker(&mut self, start: PathBuf, preselect: Option<PathBuf>) {
+        let (ctx, io) = self.picker_parts();
         let picker = FilePickerState::new(
             start,
             self.nb.path.clone(),
@@ -1547,15 +1625,125 @@ impl App {
             preselect,
             self.picker_prefs,
             ctx,
-            Box::new(io),
+            io,
         );
         self.overlay = Some(Overlay::Files(Box::new(picker)));
+    }
+
+    /// The files picker over the recent-notebooks list, newest first.
+    fn open_recent_picker(&mut self) {
+        let recent = self.recent_path.as_deref().map(Recent::load).unwrap_or_default();
+        let home = dirs::home_dir();
+        let entries = recent
+            .paths()
+            .map(|p| FileEntry::new(p.to_path_buf(), crate::files::tilde(p, home.as_deref()), false))
+            .collect();
+        let (ctx, io) = self.picker_parts();
+        let picker = FilePickerState::fixed("Recent notebooks".into(), entries, self.nb.path.clone(), self.nb.dirty, ctx, io);
+        self.overlay = Some(Overlay::Files(Box::new(picker)));
+    }
+
+    /// Record `path` in the recent-notebooks list. Failures are only logged.
+    fn remember(&self, path: &Path) {
+        let Some(store) = &self.recent_path else { return };
+        if let Err(e) = Recent::remember(store, path) {
+            tracing::warn!("recent notebooks: {e:#}");
+        }
+    }
+
+    // ----- dashboard --------------------------------------------------------
+
+    /// Close the notebook (and its kernel) and show the start dashboard.
+    fn show_dashboard(&mut self) {
+        self.close_notebook();
+        self.nb = Notebook::empty();
+        self.lang_ext = "py".to_string();
+        self.want_kernel = false;
+        self.overlay = None;
+        self.screen = Screen::Dashboard(DashboardState::default());
+        self.spawn_project_scan();
+        self.dirty_ui = true;
+    }
+
+    fn on_dash(&mut self, action: DashAction) {
+        let DashAction::Run(item) = action else { return };
+        match item {
+            DashItem::FindFiles => self.open_file_picker(self.cwd(), None),
+            DashItem::NewNotebook => {
+                self.close_notebook();
+                self.nb = Notebook::empty();
+                self.lang_ext = "py".to_string();
+                self.screen = Screen::Notebook;
+                self.resolve_kernel();
+            }
+            DashItem::Projects => self.open_projects_picker(),
+            DashItem::Recent => self.open_recent_picker(),
+            DashItem::Theme => self.open_theme_picker(),
+            DashItem::Quit => self.quit = true,
+        }
+    }
+
+    fn spawn_project_scan(&mut self) {
+        if self.projects_scanning {
+            return;
+        }
+        self.projects_scanning = true;
+        let roots = self.cfg.project_root_paths();
+        let tx = self.tx.clone();
+        let spawned = std::thread::Builder::new().name("saturn-projects".into()).spawn(move || {
+            let home = dirs::home_dir();
+            let list = crate::files::projects::scan(&roots, crate::files::projects::PROJECT_DEPTH, home.as_deref());
+            let _ = tx.send(AppEvent::Projects(list));
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("projects scan: {e}");
+            self.projects_scanning = false;
+        }
+    }
+
+    /// The Projects palette's title and rows.
+    fn project_items(&self) -> (String, Vec<PaletteItem>) {
+        let home = dirs::home_dir();
+        let now = std::time::SystemTime::now();
+        let items: Vec<PaletteItem> = self
+            .projects
+            .iter()
+            .flatten()
+            .map(|p| {
+                let mut detail = crate::files::tilde(&p.path, home.as_deref());
+                if let Some(t) = p.modified {
+                    detail.push_str(" · ");
+                    detail.push_str(&crate::files::projects::ago(t, now));
+                }
+                if p.worktree_of.is_some() {
+                    detail.push_str(" · worktree");
+                }
+                PaletteItem { label: p.name.clone(), detail, data: ItemData::Project(p.path.clone()) }
+            })
+            .collect();
+        let title = if self.projects_scanning && items.is_empty() {
+            "Projects (scanning…)".to_string()
+        } else if items.is_empty() {
+            "Projects: none found (project_roots in config.toml)".to_string()
+        } else {
+            format!("Projects ({})", items.len())
+        };
+        (title, items)
+    }
+
+    fn open_projects_picker(&mut self) {
+        if self.projects.is_none() && !self.projects_scanning {
+            self.spawn_project_scan();
+        }
+        let (title, items) = self.project_items();
+        self.overlay = Some(Overlay::Palette(PaletteState::new(PaletteKind::Projects, title, items)));
     }
 
     fn on_palette_accept(&mut self, data: ItemData) {
         match data {
             ItemData::Command(cmd) => self.dispatch(cmd),
             ItemData::Theme(name) => self.set_theme(&name),
+            ItemData::Project(path) => self.open_file_picker(path, None),
             ItemData::Kernel(i) => {
                 let spec = self.kernelspecs.as_ref().and_then(|s| s.get(i)).cloned();
                 if let Some(spec) = spec {
@@ -1593,6 +1781,8 @@ impl App {
         let nb = nbio::load(path)?;
         self.close_notebook();
         self.nb = nb;
+        self.screen = Screen::Notebook;
+        self.remember(path);
         if let Some(lang) = self.nb.language() {
             self.lang_ext = language_extension(lang).to_string();
         }
@@ -1635,6 +1825,7 @@ impl App {
         match nbio::save(&self.nb, &path) {
             Ok(()) => {
                 self.nb.dirty = false;
+                self.remember(&path);
                 self.flash(format!("saved {}", path.display()));
             }
             Err(e) => self.flash_err(format!("save failed: {e:#}")),
