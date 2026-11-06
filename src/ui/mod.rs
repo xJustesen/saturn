@@ -24,6 +24,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let [main, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     app.view = main;
+    app.edit_cursor = None;
     let buf = frame.buffer_mut();
     buf.set_style(area, app.theme.base());
     // The popout covers the notebook; not drawing it underneath keeps inline
@@ -62,5 +63,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     status_bar::render(buf, status, app);
     if let Some(ov) = &mut app.overlay {
         overlay::render(buf, area, ov, &app.theme);
+    } else if let Some(pos) = app.edit_cursor {
+        frame.set_cursor_position(pos);
     }
 }

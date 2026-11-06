@@ -1,8 +1,8 @@
 //! Measuring and drawing a single cell (gutter, bar, source, outputs).
 
-use edtui::{EditorTheme, EditorView, LineNumbers, SyntaxHighlighter};
+use edtui::{EditorMode, EditorTheme, EditorView, LineNumbers, SyntaxHighlighter};
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
@@ -117,7 +117,8 @@ pub fn render(
     top: i32,
     ctx: &mut CellCtx,
     buf: &mut Buffer,
-) {
+) -> Option<Position> {
+    let mut cursor = None;
     let cw = content_width(area.width);
     let tab = ctx.cfg.tab_width;
     let wrap = ctx.cfg.wrap;
@@ -172,9 +173,14 @@ pub fn render(
         (Some(ed), true) => {
             let g = editor_gutter(ed.line_count(), ctx.line_numbers) as u16;
             let mut scratch = Buffer::empty(Rect::new(0, 0, cw, layout.source_rows));
+            // Insert mode uses the terminal's own cursor (a bar, see main.rs);
+            // the other vim modes keep edtui's block.
+            let insert = ed.state.mode == EditorMode::Insert;
+            let cursor_style =
+                if insert { Style::default() } else { Style::default().add_modifier(Modifier::REVERSED) };
             let ed_theme = EditorTheme::default()
                 .base(theme.base())
-                .cursor_style(Style::default().add_modifier(Modifier::REVERSED))
+                .cursor_style(cursor_style)
                 .selection_style(Style::default().bg(theme.ui.selection))
                 .line_numbers_style(Style::default().fg(theme.ui.line_numbers))
                 .hide_status_line();
@@ -195,6 +201,12 @@ pub fn render(
             }
             let _ = g;
             view.render(scratch.area, &mut scratch);
+            if insert && let Some(p) = ed.state.cursor_screen_position() {
+                let dy = top + p.y as i32;
+                if p.x < cw && p.y < layout.source_rows && dy >= 0 && dy < height {
+                    cursor = Some(Position::new(cx + p.x, area.y + dy as u16));
+                }
+            }
             for sy in 0..layout.source_rows {
                 let dy = top + sy as i32;
                 if dy < 0 || dy >= height {
@@ -266,7 +278,7 @@ pub fn render(
 
     // outputs
     if cell.kind != CellKind::Code || cell.outputs.is_empty() {
-        return;
+        return cursor;
     }
     let mut y0 = top + src_rows;
     if cell.outputs_collapsed {
@@ -274,7 +286,7 @@ pub fn render(
             let msg = format!("▸ {} output(s) hidden (o to show)", cell.outputs.len());
             buf.set_string(cx, area.y + y0 as u16, msg, theme.placeholder());
         }
-        return;
+        return cursor;
     }
     let mut octx = OutputCtx { cfg: ctx.cfg, theme, images: ctx.images, plotly: ctx.plotly, expanded: cell.outputs_expanded };
     for (i, o) in cell.outputs.iter().enumerate() {
@@ -320,4 +332,5 @@ pub fn render(
         }
         y0 += rows;
     }
+    cursor
 }

@@ -25,7 +25,7 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
     let total_rows = app.layout.total_rows();
     let scroll_row = app.scroll_row;
     let focused = app.focused;
-    let App { nb, layout, cache, images, plotly, cfg, theme, lang_ext, line_numbers, search, .. } = app;
+    let App { nb, layout, cache, images, plotly, cfg, theme, lang_ext, line_numbers, search, edit_cursor, .. } = app;
     let mut ctx = CellCtx { cfg, theme, cache, images, plotly, lang_ext, line_numbers: *line_numbers };
     let hl = search.active();
     let cx = area.x + GUTTER_W + BAR_W;
@@ -37,7 +37,10 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
         }
         let h = l.total as i64;
         if top + h > 0 {
-            cell::render(&mut nb.cells[i], l, i == focused, editing && i == focused, area, top as i32, &mut ctx, buf);
+            let cur = cell::render(&mut nb.cells[i], l, i == focused, editing && i == focused, area, top as i32, &mut ctx, buf);
+            if cur.is_some() {
+                *edit_cursor = cur;
+            }
             // Search matches go over the source rows; the editor draws its
             // own search while a cell is being edited.
             if hl && !(editing && i == focused) {

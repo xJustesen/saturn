@@ -136,7 +136,13 @@ pub fn restore_terminal() {
     if KBD_ENHANCED.swap(false, Ordering::SeqCst) {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(out, DisableBracketedPaste, LeaveAlternateScreen, crossterm::cursor::Show);
+    let _ = execute!(
+        out,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        crossterm::cursor::SetCursorStyle::DefaultUserShape,
+        crossterm::cursor::Show
+    );
     let _ = disable_raw_mode();
 }
 
@@ -201,7 +207,9 @@ async fn run(opts: Opts, log_path: PathBuf) -> Result<()> {
         )?;
         KBD_ENHANCED.store(true, Ordering::SeqCst);
     }
-    execute!(io::stdout(), EnableBracketedPaste)?;
+    // The terminal cursor is shown only while typing in a cell (insert
+    // mode), where it should read as a line; it stays hidden otherwise.
+    execute!(io::stdout(), EnableBracketedPaste, crossterm::cursor::SetCursorStyle::SteadyBar)?;
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;

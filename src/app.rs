@@ -103,6 +103,8 @@ pub struct App {
     pub lang_ext: String,
     pub line_numbers: bool,
     pub view: Rect,
+    /// Screen position of the insert-mode cursor, set while drawing.
+    pub edit_cursor: Option<ratatui::layout::Position>,
     pub log_path: PathBuf,
     pub spinner: usize,
     pub graphics_label: String,
@@ -164,6 +166,7 @@ impl App {
             search: SearchState::default(),
             lang_ext: "py".to_string(),
             view: Rect::default(),
+            edit_cursor: None,
             log_path,
             spinner: 0,
             graphics_label,
