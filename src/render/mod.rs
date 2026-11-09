@@ -252,6 +252,13 @@ fn plain_alt(media: &Media) -> Option<&str> {
     })
 }
 
+/// Python's default `repr`, `<module.Class at 0x…>` or `<… object at 0x…>`:
+/// it says nothing about the value, so a richer mimetype should win over it.
+fn is_bare_repr(s: &str) -> bool {
+    let s = s.trim();
+    s.starts_with('<') && s.ends_with('>') && !s.contains('\n') && s.contains(" at 0x")
+}
+
 /// How much room an output may take.
 #[derive(Clone, Copy)]
 pub struct Box {
@@ -319,6 +326,14 @@ fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
     let Some(mut m) = richest(data) else {
         return placeholder("[no displayable output]", ctx.theme);
     };
+    // A pandas `Styler` (and similar) only has a bare repr as text/plain; its
+    // HTML is the real output.
+    if let MediaType::Plain(p) = m
+        && is_bare_repr(p)
+        && let Some(h) = data.content.iter().find(|m| matches!(m, MediaType::Html(_)))
+    {
+        m = h;
+    }
     // In the popout a plotly figure is re-rendered at the popout's own pixel
     // size, which beats any (small) PNG that came with it.
     if popout && ctx.plotly.usable()
@@ -380,11 +395,11 @@ fn render_media(data: &Media, bx: Box, ctx: &mut OutputCtx) -> Rendered {
             Rendered::Text(wrap_text(t, w, tab, wrap))
         }
         MediaType::Html(s) => {
-            let text = match plain_alt(data) {
-                Some(p) => expand_tabs(p.trim_end_matches('\n'), tab),
-                None => html::to_text(s),
+            let t = match plain_alt(data).filter(|p| !is_bare_repr(p)) {
+                Some(p) => plain(&expand_tabs(p.trim_end_matches('\n'), tab), Style::default()),
+                None => html::table(s).unwrap_or_else(|| plain(&html::to_text(s), Style::default())),
             };
-            let t = truncate_stream(plain(&text, Style::default()), ctx);
+            let t = truncate_stream(t, ctx);
             Rendered::Text(wrap_text(t, w, tab, wrap))
         }
         MediaType::Latex(s) => Rendered::Text(wrap_text(plain(s, Style::default()), w, tab, wrap)),
