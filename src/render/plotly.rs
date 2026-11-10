@@ -32,15 +32,24 @@ pub enum PlotlyState {
     Failed(String),
 }
 
-struct Request {
-    hash: u64,
-    figure: Value,
-    width: u32,
-    height: u32,
+enum Request {
+    Render { hash: u64, figure: Value, width: u32, height: u32 },
+    /// A live-session message, already in the sidecar's wire format.
+    Live(Value),
+}
+
+/// Mouse input forwarded to a live figure, in page pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LiveInput {
+    Move { x: f64, y: f64 },
+    Down { x: f64, y: f64, button: &'static str },
+    Up { x: f64, y: f64, button: &'static str },
+    Wheel { x: f64, y: f64, dx: f64, dy: f64 },
 }
 
 #[derive(Deserialize)]
 struct Response {
+    #[serde(default)]
     id: u64,
     #[serde(default)]
     png_base64: Option<String>,
@@ -49,6 +58,9 @@ struct Response {
     /// Sent once (with id 0) when the sidecar's browser is up.
     #[serde(default)]
     ready: bool,
+    /// Set on frames (and errors) of a live session.
+    #[serde(default)]
+    live: Option<u64>,
 }
 
 pub struct PlotlySidecar {
@@ -58,6 +70,9 @@ pub struct PlotlySidecar {
     pending: HashSet<u64>,
     failed: HashMap<u64, String>,
     scale: f64,
+    next_live: u64,
+    /// The open live session, if any (there is one popout).
+    live: Option<u64>,
     pub fatal: Option<String>,
     pub enabled: bool,
 }
@@ -71,6 +86,8 @@ impl PlotlySidecar {
             pending: HashSet::new(),
             failed: HashMap::new(),
             scale,
+            next_live: 1,
+            live: None,
             fatal: None,
             enabled: true,
         }
@@ -97,10 +114,57 @@ impl PlotlySidecar {
         }
         if let Some(req_tx) = &self.req_tx {
             self.pending.insert(hash);
-            let _ = req_tx.send(Request { hash, figure: figure.clone(), width, height });
+            let _ = req_tx.send(Request::Render { hash, figure: figure.clone(), width, height });
             PlotlyState::Pending
         } else {
             PlotlyState::Failed(self.fatal.clone().unwrap_or_else(|| "sidecar unavailable".into()))
+        }
+    }
+
+    /// Open an interactive session for `figure` in a `width`×`height` pixel
+    /// page. Frames arrive as [`AppEvent::PlotlyLive`] carrying the returned id.
+    pub fn live_open(&mut self, figure: &Value, width: u32, height: u32) -> Option<u64> {
+        self.live_close();
+        if !self.usable() {
+            return None;
+        }
+        if self.req_tx.is_none() {
+            self.start();
+        }
+        let sid = self.next_live;
+        self.next_live += 1;
+        let msg = serde_json::json!({"live": "open", "sid": sid, "figure": figure, "width": width, "height": height});
+        self.req_tx.as_ref()?.send(Request::Live(msg)).ok()?;
+        self.live = Some(sid);
+        Some(sid)
+    }
+
+    pub fn live_input(&self, sid: u64, input: LiveInput) {
+        let msg = match input {
+            LiveInput::Move { x, y } => serde_json::json!({"live": "input", "sid": sid, "type": "move", "x": x, "y": y}),
+            LiveInput::Down { x, y, button } => {
+                serde_json::json!({"live": "input", "sid": sid, "type": "down", "x": x, "y": y, "button": button})
+            }
+            LiveInput::Up { x, y, button } => {
+                serde_json::json!({"live": "input", "sid": sid, "type": "up", "x": x, "y": y, "button": button})
+            }
+            LiveInput::Wheel { x, y, dx, dy } => {
+                serde_json::json!({"live": "input", "sid": sid, "type": "wheel", "x": x, "y": y, "dx": dx, "dy": dy})
+            }
+        };
+        self.live_send(msg);
+    }
+
+    /// Close the open live session, if there is one.
+    pub fn live_close(&mut self) {
+        if let Some(sid) = self.live.take() {
+            self.live_send(serde_json::json!({"live": "close", "sid": sid}));
+        }
+    }
+
+    fn live_send(&self, msg: Value) {
+        if let Some(req_tx) = &self.req_tx {
+            let _ = req_tx.send(Request::Live(msg));
         }
     }
 
@@ -135,6 +199,7 @@ impl PlotlySidecar {
         }
         self.fatal = Some(reason);
         self.req_tx = None;
+        self.live = None;
     }
 
     fn script_path() -> PathBuf {
@@ -193,16 +258,21 @@ async fn run_sidecar(
         tokio::select! {
             req = req_rx.recv() => {
                 let Some(req) = req else { break };
-                let id = next_id;
-                next_id += 1;
-                in_flight.insert(id, req.hash);
-                let line = serde_json::json!({
-                    "id": id,
-                    "figure": req.figure,
-                    "width": req.width,
-                    "height": req.height,
-                    "scale": scale,
-                })
+                let line = match req {
+                    Request::Render { hash, figure, width, height } => {
+                        let id = next_id;
+                        next_id += 1;
+                        in_flight.insert(id, hash);
+                        serde_json::json!({
+                            "id": id,
+                            "figure": figure,
+                            "width": width,
+                            "height": height,
+                            "scale": scale,
+                        })
+                    }
+                    Request::Live(msg) => msg,
+                }
                 .to_string();
                 if stdin.write_all(line.as_bytes()).await.is_err() || stdin.write_all(b"\n").await.is_err() {
                     let _ = tx.send(AppEvent::PlotlyFatal("sidecar stdin closed".into()));
@@ -217,6 +287,18 @@ async fn run_sidecar(
                             Ok(resp) => {
                                 if resp.ready {
                                     tracing::info!("plotly sidecar ready");
+                                    continue;
+                                }
+                                if let Some(sid) = resp.live {
+                                    let result = match (resp.png_base64, resp.error) {
+                                        (Some(b64), _) => base64::Engine::decode(
+                                            &base64::engine::general_purpose::STANDARD,
+                                            b64.as_bytes(),
+                                        )
+                                        .map_err(|e| e.to_string()),
+                                        (None, e) => Err(e.unwrap_or_else(|| "empty sidecar response".into())),
+                                    };
+                                    let _ = tx.send(AppEvent::PlotlyLive { sid, result });
                                     continue;
                                 }
                                 if resp.id == 0 && in_flight.is_empty() && let Some(e) = resp.error {
@@ -236,7 +318,10 @@ async fn run_sidecar(
                                 };
                                 let _ = tx.send(AppEvent::PlotlyDone { hash, result });
                             }
-                            Err(e) => tracing::warn!("sidecar: bad line {line:?}: {e}"),
+                            Err(e) => {
+                                let head: String = line.chars().take(200).collect();
+                                tracing::warn!("sidecar: bad line {head:?}: {e}");
+                            }
                         }
                     }
                     Ok(Ok(None)) | Ok(Err(_)) => {

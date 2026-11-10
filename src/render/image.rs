@@ -119,6 +119,21 @@ impl ImageStore {
         Some((cols, rows))
     }
 
+    /// Register one frame of a live figure, already rendered at the pixel size
+    /// of a `cols`×`rows` box, so it is shown as is (no rescaling).
+    pub fn ensure_frame(&mut self, key: u64, bytes: Vec<u8>, cols: u16, rows: u16) {
+        self.entries.insert(key, ImageEntry { state: ImageState::Pending, cols, rows });
+        let picker = self.picker.clone();
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = ::image::load_from_memory(&bytes).map_err(|e| e.to_string()).and_then(|img| {
+                SlicedProtocol::new_with_resize(&picker, img, Size { width: cols, height: rows }, Resize::Fit(None))
+                    .map_err(|e| e.to_string())
+            });
+            let _ = tx.send(AppEvent::ImageReady { hash: key, result });
+        });
+    }
+
     /// Drop an entry (e.g. a popout-sized render that is no longer shown).
     pub fn remove(&mut self, key: u64) {
         self.entries.remove(&key);

@@ -131,8 +131,53 @@ fn init_logging(log: Option<PathBuf>) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Ask the terminal whether it supports SGR-pixel mouse reporting (DEC mode
+/// 1016), which lets a click land on a plotly control smaller than a cell.
+/// The DECRQM query is followed by a device-attributes request, which every
+/// terminal answers, so an unsupported query does not cost the full timeout.
+/// Must run in raw mode, before the event stream reads stdin.
+fn query_pixel_mouse() -> bool {
+    use std::io::Write;
+    let mut out = io::stdout();
+    if out.write_all(b"\x1b[?1016$p\x1b[c").and_then(|_| out.flush()).is_err() {
+        return false;
+    }
+    let fd = io::stdin().as_raw_fd();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    let mut seen: Vec<u8> = Vec::new();
+    loop {
+        // The device-attributes reply (`CSI ? … c`) ends the exchange.
+        if let Some(i) = seen.iter().rposition(|&b| b == 0x1b)
+            && seen[i..].starts_with(b"\x1b[?")
+            && seen.ends_with(b"c")
+        {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        // SAFETY: `pfd` is a valid pollfd for the duration of the call.
+        if unsafe { libc::poll(&mut pfd, 1, left.as_millis() as libc::c_int) } <= 0 {
+            break;
+        }
+        let mut chunk = [0u8; 256];
+        // SAFETY: `chunk` is a writable buffer of the given length.
+        let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if n <= 0 {
+            break;
+        }
+        seen.extend_from_slice(&chunk[..n as usize]);
+    }
+    // `CSI ? 1016 ; Ps $ y`: 1 set, 2 reset, 3 permanently set; 0 and 4 mean no.
+    let text = String::from_utf8_lossy(&seen);
+    ["\x1b[?1016;1$y", "\x1b[?1016;2$y", "\x1b[?1016;3$y"].iter().any(|r| text.contains(r))
+}
+
 pub fn restore_terminal() {
     let mut out = io::stdout();
+    app::disable_mouse();
     if KBD_ENHANCED.swap(false, Ordering::SeqCst) {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
@@ -196,6 +241,10 @@ async fn run(opts: Opts, log_path: PathBuf) -> Result<()> {
         }
     };
     tracing::info!(protocol = ?picker.protocol_type(), font = ?picker.font_size(), "graphics");
+
+    let mut opts = opts;
+    opts.pixel_mouse = query_pixel_mouse();
+    tracing::info!(pixel_mouse = opts.pixel_mouse, "mouse");
 
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(

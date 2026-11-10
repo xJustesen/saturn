@@ -139,6 +139,15 @@ are re-rendered by the sidecar at the popout's pixel size, PNGs are scaled up (a
 `Ctrl+D`/`Ctrl+U`, `g`/`G` scroll, `w` toggles wrapping, `h`/`l` pan when unwrapped,
 `Tab`/`Shift+Tab` (or `n`/`p`) switch between the cell's outputs, `Esc`/`q`/`z` close.
 
+A plotly figure in the popout is interactive: it runs as a live page in the sidecar's
+browser, the mouse is forwarded to it and the page is redrawn as it changes. Hover
+shows data labels, dropdowns, buttons, sliders, the legend and the mode bar respond to
+clicks, dragging zooms, the wheel zooms too, and a double-click resets the axes. Mouse
+reporting is only switched on while such a figure is showing, so the terminal's own
+text selection works everywhere else. Terminals with SGR-pixel mouse reporting
+(Ghostty, kitty, foot, WezTerm) give pixel-precise positions; elsewhere the pointer
+snaps to the centre of the cell under it.
+
 ## Configuration
 
 `~/.config/saturn/config.toml` (all keys optional):

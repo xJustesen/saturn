@@ -1,24 +1,44 @@
 //! Output popout: one output of a cell in a modal that fills the terminal,
 //! with figures re-rendered at the popout's size.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
+use ratatui_image::FontSize;
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
 
 use crate::config::Config;
 use crate::notebook::{Cell, CellId, Output};
 use crate::render::image::{ImageState, ImageStore};
-use crate::render::plotly::PlotlySidecar;
+use crate::render::plotly::{LiveInput, PlotlySidecar};
 use crate::render::{self, Box as RenderBox, OutputCtx, Rendered};
 use crate::theme::Theme;
 
 /// Space around the modal.
 const MARGIN_X: u16 = 2;
 const MARGIN_Y: u16 = 1;
+/// Page pixels scrolled per wheel notch in a live figure.
+const WHEEL_STEP: f64 = 100.0;
+
+/// An interactive plotly figure: a page in the sidecar's browser that mouse
+/// input is forwarded to, shown as a stream of frames.
+struct Live {
+    sid: u64,
+    /// Figure and box this session was opened for.
+    key: (u64, u16, u16),
+    cols: u16,
+    rows: u16,
+    /// Where the figure is on screen, in cells.
+    rect: Rect,
+    /// Image-store keys of the frame on screen and of the one being decoded.
+    shown: Option<u64>,
+    next: Option<u64>,
+    frames: u64,
+    last_input: Option<LiveInput>,
+}
 
 pub struct PopoutState {
     pub cell: usize,
@@ -36,6 +56,7 @@ pub struct PopoutState {
     view_rows: usize,
     view_cols: usize,
     content_cols: usize,
+    live: Option<Live>,
 }
 
 pub enum PopoutAction {
@@ -58,7 +79,122 @@ impl PopoutState {
             view_rows: 1,
             view_cols: 1,
             content_cols: 0,
+            live: None,
         }
+    }
+
+    /// Whether an interactive figure is showing (and wants mouse input).
+    pub fn is_live(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// Whether `key` is one of the live figure's frames in the [`ImageStore`].
+    pub fn owns_frame(&self, key: u64) -> bool {
+        self.live.as_ref().is_some_and(|l| l.shown == Some(key) || l.next == Some(key))
+    }
+
+    /// A new frame of the live figure arrived from the sidecar.
+    pub fn live_frame(&mut self, sid: u64, png: Vec<u8>, images: &mut ImageStore) {
+        let Some(live) = self.live.as_mut().filter(|l| l.sid == sid) else { return };
+        live.frames += 1;
+        let key = render::sized_key(sid ^ 0x6c69_7665_6672_616d, live.frames as u16, (live.frames >> 16) as u16);
+        // Only the newest frame is worth decoding.
+        if let Some(stale) = live.next.replace(key) {
+            images.remove(stale);
+        }
+        images.ensure_frame(key, png, live.cols, live.rows);
+    }
+
+    /// Forward a mouse event to the live figure. With `pixels`, the event's
+    /// position is in pixels (SGR-pixel mouse reporting) rather than cells.
+    pub fn handle_mouse(&mut self, ev: MouseEvent, font: FontSize, pixels: bool, plotly: &PlotlySidecar) {
+        let Some(live) = self.live.as_mut() else { return };
+        let (fw, fh) = (f64::from(font.width.max(1)), f64::from(font.height.max(1)));
+        let (x0, y0) = (f64::from(live.rect.x) * fw, f64::from(live.rect.y) * fh);
+        let (x, y) = if pixels {
+            (f64::from(ev.column) - x0, f64::from(ev.row) - y0)
+        } else {
+            ((f64::from(ev.column) + 0.5) * fw - x0, (f64::from(ev.row) + 0.5) * fh - y0)
+        };
+        let inside = x >= 0.0 && y >= 0.0 && x < f64::from(live.cols) * fw && y < f64::from(live.rows) * fh;
+        let button = |b: MouseButton| match b {
+            MouseButton::Left => "left",
+            MouseButton::Right => "right",
+            MouseButton::Middle => "middle",
+        };
+        let wheel = |dx: f64, dy: f64| LiveInput::Wheel { x, y, dx, dy };
+        let input = match ev.kind {
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => LiveInput::Move { x, y },
+            MouseEventKind::Down(b) if inside => LiveInput::Down { x, y, button: button(b) },
+            MouseEventKind::Up(b) => LiveInput::Up { x, y, button: button(b) },
+            MouseEventKind::ScrollUp if inside => wheel(0.0, -WHEEL_STEP),
+            MouseEventKind::ScrollDown if inside => wheel(0.0, WHEEL_STEP),
+            MouseEventKind::ScrollLeft if inside => wheel(-WHEEL_STEP, 0.0),
+            MouseEventKind::ScrollRight if inside => wheel(WHEEL_STEP, 0.0),
+            _ => return,
+        };
+        // Any-motion reporting repeats positions; the page only needs changes.
+        if matches!(input, LiveInput::Move { .. }) && live.last_input == Some(input) {
+            return;
+        }
+        live.last_input = Some(input);
+        plotly.live_input(live.sid, input);
+    }
+
+    fn end_live(&mut self, images: &mut ImageStore, plotly: &mut PlotlySidecar) {
+        if let Some(live) = self.live.take() {
+            plotly.live_close();
+            for k in live.shown.into_iter().chain(live.next) {
+                images.remove(k);
+            }
+        }
+    }
+
+    /// Keep a live session open for `fig` drawn in `inner`; returns true when
+    /// one of its frames was drawn (so the static render is not needed).
+    fn draw_live(
+        &mut self,
+        buf: &mut Buffer,
+        inner: Rect,
+        fig: &serde_json::Value,
+        fig_key: u64,
+        images: &mut ImageStore,
+        plotly: &mut PlotlySidecar,
+    ) -> bool {
+        let (cols, rows) = images.clamp_box(inner.width, inner.height);
+        let key = (fig_key, cols, rows);
+        if self.live.as_ref().is_some_and(|l| l.key != key) {
+            self.end_live(images, plotly);
+        }
+        if self.live.is_none() {
+            let font = images.font_size();
+            let (w, h) = (u32::from(cols) * u32::from(font.width.max(1)), u32::from(rows) * u32::from(font.height.max(1)));
+            let Some(sid) = plotly.live_open(fig, w, h) else { return false };
+            self.live =
+                Some(Live { sid, key, cols, rows, rect: Rect::default(), shown: None, next: None, frames: 0, last_input: None });
+        }
+        let Some(live) = self.live.as_mut() else { return false };
+        live.rect = Rect::new(inner.x + (inner.width - cols) / 2, inner.y + (inner.height - rows) / 2, cols, rows);
+        // Swap in the newest frame once it is decoded, so there is no gap.
+        if let Some(next) = live.next
+            && let Some(e) = images.get(next)
+            && !matches!(e.state, ImageState::Pending)
+        {
+            if matches!(e.state, ImageState::Ready(_)) {
+                if let Some(old) = live.shown.replace(next) {
+                    images.remove(old);
+                }
+            } else {
+                images.remove(next);
+            }
+            live.next = None;
+        }
+        let Some(ImageState::Ready(proto)) = live.shown.and_then(|k| images.get(k)).map(|e| &e.state) else {
+            return false;
+        };
+        let pos = SignedPosition { x: (live.rect.x - inner.x) as i16, y: (live.rect.y - inner.y) as i16 };
+        SlicedImage::new(proto, pos).render(inner, buf);
+        true
     }
 
     /// The output to open first: the first figure, else the first output.
@@ -113,7 +249,8 @@ impl PopoutState {
     }
 
     /// Forget popout-sized images once the popout closes.
-    pub fn close(self, images: &mut ImageStore) {
+    pub fn close(mut self, images: &mut ImageStore, plotly: &mut PlotlySidecar) {
+        self.end_live(images, plotly);
         for k in self.image_keys {
             images.remove(k);
         }
@@ -167,7 +304,19 @@ pub fn render(buf: &mut Buffer, area: Rect, p: &mut PopoutState, cell: Option<&C
         }
         _ => (format!(" cell {} · no outputs ", p.cell + 1), None),
     };
-    let hint = " j/k scroll  h/l pan  w wrap  Tab next output  Esc close ";
+    // A plotly figure is interactive while the sidecar can serve it.
+    let live_fig = body
+        .and_then(|o| o.media())
+        .filter(|_| ctx.plotly.usable())
+        .and_then(|data| data.content.iter().find_map(|m| match m {
+            jupyter_protocol::MediaType::Plotly(v) => Some(v),
+            _ => None,
+        }));
+    let hint = if live_fig.is_some() {
+        " mouse: hover · click · drag to zoom · double-click resets  Tab next output  Esc close "
+    } else {
+        " j/k scroll  h/l pan  w wrap  Tab next output  Esc close "
+    };
     let theme = ctx.theme;
     let block = Block::default()
         .borders(Borders::ALL)
@@ -184,10 +333,22 @@ pub fn render(buf: &mut Buffer, area: Rect, p: &mut PopoutState, cell: Option<&C
     p.view_rows = inner.height as usize;
     p.view_cols = inner.width as usize;
     let Some(o) = body else {
+        p.end_live(ctx.images, ctx.plotly);
         p.content_rows = 0;
         buf.set_string(inner.x, inner.y, "(no outputs)", theme.placeholder());
         return;
     };
+    match live_fig {
+        Some(fig) => {
+            let fig_key = render::output_key(o, true);
+            if p.draw_live(buf, inner, fig, fig_key, ctx.images, ctx.plotly) {
+                p.content_rows = 0;
+                p.content_cols = 0;
+                return;
+            }
+        }
+        None => p.end_live(ctx.images, ctx.plotly),
+    }
 
     // Render (or reuse) the output for this box. Placeholders for images and
     // plotly figures are re-checked every frame until they resolve.

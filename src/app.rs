@@ -1,10 +1,12 @@
 //! Application state, the event loop and command dispatch.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::style::Print;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
 use edtui::EditorMode;
 use futures::StreamExt;
 use jupyter_zmq_client::KernelspecDir;
@@ -50,6 +52,8 @@ pub enum AppEvent {
     ImageReady { hash: u64, result: Result<SlicedProtocol, String> },
     PlotlyDone { hash: u64, result: Result<Vec<u8>, String> },
     PlotlyFatal(String),
+    /// A frame (or the failure) of the popout's interactive plotly figure.
+    PlotlyLive { sid: u64, result: Result<Vec<u8>, String> },
     Kernelspecs(Vec<KernelspecDir>),
     /// From the files picker's scanner and preview worker.
     Files(crate::files::FilesEvent),
@@ -57,6 +61,21 @@ pub enum AppEvent {
     Projects(Vec<Project>),
     Tick,
 }
+
+/// Whether mouse reporting is switched on in the terminal (it is only while
+/// an interactive figure is showing, so text selection works otherwise).
+pub static MOUSE_ON: AtomicBool = AtomicBool::new(false);
+
+/// Switch mouse reporting off if it is on (also used when leaving the terminal).
+pub fn disable_mouse() {
+    if MOUSE_ON.swap(false, Ordering::SeqCst) {
+        let _ = crossterm::execute!(std::io::stdout(), Print(PIXEL_MOUSE_OFF), DisableMouseCapture);
+    }
+}
+
+/// SGR-pixel mouse reporting (DEC mode 1016): positions in pixels, not cells.
+const PIXEL_MOUSE_ON: &str = "\x1b[?1016h";
+const PIXEL_MOUSE_OFF: &str = "\x1b[?1016l";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -109,6 +128,8 @@ pub struct App {
     pub spinner: usize,
     pub graphics_label: String,
     picker_prefs: PickerPrefs,
+    /// The terminal reports mouse positions in pixels when asked (mode 1016).
+    pixel_mouse: bool,
     edit_snapshot: Option<(usize, Cell)>,
     opts_kernel: Option<String>,
     want_kernel: bool,
@@ -156,6 +177,7 @@ impl App {
             kernelspecs: None,
             line_numbers: cfg.line_numbers,
             picker_prefs: PickerPrefs { show_hidden: cfg.show_hidden, show_ignored: cfg.show_ignored },
+            pixel_mouse: opts.pixel_mouse,
             cfg,
             theme,
             theme_before_pick: None,
@@ -262,6 +284,7 @@ impl App {
                 }
                 self.dirty_ui = false;
             }
+            self.sync_mouse();
             let Some(ev) = self.rx.recv().await else { break };
             self.handle(ev);
             let mut n = 0;
@@ -283,8 +306,38 @@ impl App {
         Ok(())
     }
 
+    /// Mouse reporting follows the popout: on while it shows an interactive
+    /// figure, off otherwise. A session left behind by a replaced overlay is
+    /// closed here too.
+    fn sync_mouse(&mut self) {
+        let live = matches!(&self.overlay, Some(Overlay::Popout(p)) if p.is_live());
+        if !live {
+            self.plotly.live_close();
+            disable_mouse();
+        } else if !MOUSE_ON.swap(true, Ordering::SeqCst) {
+            let mut out = std::io::stdout();
+            let _ = crossterm::execute!(out, EnableMouseCapture);
+            if self.pixel_mouse {
+                let _ = crossterm::execute!(out, Print(PIXEL_MOUSE_ON));
+            }
+        }
+    }
+
     fn handle(&mut self, ev: AppEvent) {
         match ev {
+            AppEvent::Terminal(Event::Mouse(m)) => {
+                if let Some(Overlay::Popout(p)) = &mut self.overlay {
+                    p.handle_mouse(m, self.images.font_size(), self.pixel_mouse, &self.plotly);
+                }
+            }
+            AppEvent::PlotlyLive { sid, result } => match result {
+                Ok(png) => {
+                    if let Some(Overlay::Popout(p)) = &mut self.overlay {
+                        p.live_frame(sid, png, &mut self.images);
+                    }
+                }
+                Err(e) => tracing::warn!("plotly live figure: {e}"),
+            },
             AppEvent::Terminal(Event::Key(key)) => {
                 self.on_key(key);
                 self.dirty_ui = true;
@@ -315,7 +368,10 @@ impl App {
             }
             AppEvent::ImageReady { hash, result } => {
                 self.images.set_result(hash, result);
-                self.layout.invalidate_all();
+                // A frame of the popout's live figure changes no layout.
+                if !matches!(&self.overlay, Some(Overlay::Popout(p)) if p.owns_frame(hash)) {
+                    self.layout.invalidate_all();
+                }
                 self.dirty_ui = true;
             }
             AppEvent::PlotlyDone { hash, result } => {
@@ -1214,7 +1270,7 @@ impl App {
 
     fn close_popout(&mut self) {
         if let Some(Overlay::Popout(p)) = self.overlay.take() {
-            p.close(&mut self.images);
+            p.close(&mut self.images, &mut self.plotly);
         }
     }
 
