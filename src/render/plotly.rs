@@ -155,6 +155,11 @@ impl PlotlySidecar {
         self.live_send(msg);
     }
 
+    /// Tell the sidecar the last frame is on screen, releasing the next one.
+    pub fn live_ack(&self, sid: u64) {
+        self.live_send(serde_json::json!({"live": "ack", "sid": sid}));
+    }
+
     /// Close the open live session, if there is one.
     pub fn live_close(&mut self) {
         if let Some(sid) = self.live.take() {
@@ -290,12 +295,9 @@ async fn run_sidecar(
                                     continue;
                                 }
                                 if let Some(sid) = resp.live {
+                                    // Kept as base64: the Kitty protocol takes it as is.
                                     let result = match (resp.png_base64, resp.error) {
-                                        (Some(b64), _) => base64::Engine::decode(
-                                            &base64::engine::general_purpose::STANDARD,
-                                            b64.as_bytes(),
-                                        )
-                                        .map_err(|e| e.to_string()),
+                                        (Some(b64), _) => Ok(b64),
                                         (None, e) => Err(e.unwrap_or_else(|| "empty sidecar response".into())),
                                     };
                                     let _ = tx.send(AppEvent::PlotlyLive { sid, result });

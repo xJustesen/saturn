@@ -69,6 +69,12 @@ impl ImageStore {
         }
     }
 
+    /// Whether live frames can go to the terminal as PNG through
+    /// [`crate::render::kitty`] (tmux would need every chunk wrapped).
+    pub fn kitty_direct(&self) -> bool {
+        matches!(self.picker.protocol_type(), ProtocolType::Kitty) && !self.picker.tmux_detected()
+    }
+
     pub fn is_halfblocks(&self) -> bool {
         matches!(self.picker.protocol_type(), ProtocolType::Halfblocks)
     }

@@ -2,6 +2,7 @@
 
 pub mod html;
 pub mod image;
+pub mod kitty;
 pub mod plotly;
 
 use std::collections::HashMap;

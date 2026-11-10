@@ -13,6 +13,7 @@ use ratatui_image::sliced::{SignedPosition, SlicedImage};
 use crate::config::Config;
 use crate::notebook::{Cell, CellId, Output};
 use crate::render::image::{ImageState, ImageStore};
+use crate::render::kitty::FrameStream;
 use crate::render::plotly::{LiveInput, PlotlySidecar};
 use crate::render::{self, Box as RenderBox, OutputCtx, Rendered};
 use crate::theme::Theme;
@@ -33,7 +34,12 @@ struct Live {
     rows: u16,
     /// Where the figure is on screen, in cells.
     rect: Rect,
-    /// Image-store keys of the frame on screen and of the one being decoded.
+    /// With the Kitty protocol frames go straight to the terminal: the newest
+    /// one not yet transmitted, and the stream they are sent on.
+    direct: Option<FrameStream>,
+    pending: Option<String>,
+    /// Otherwise they go through the image store: keys of the frame on screen
+    /// and of the one being decoded.
     shown: Option<u64>,
     next: Option<u64>,
     frames: u64,
@@ -93,9 +99,20 @@ impl PopoutState {
         self.live.as_ref().is_some_and(|l| l.shown == Some(key) || l.next == Some(key))
     }
 
-    /// A new frame of the live figure arrived from the sidecar.
-    pub fn live_frame(&mut self, sid: u64, png: Vec<u8>, images: &mut ImageStore) {
-        let Some(live) = self.live.as_mut().filter(|l| l.sid == sid) else { return };
+    /// A new frame (base64 PNG) of the live figure arrived from the sidecar.
+    /// Returns true when the popout must be redrawn to show it.
+    pub fn live_frame(&mut self, sid: u64, png_base64: String, images: &mut ImageStore, plotly: &PlotlySidecar) -> bool {
+        let Some(live) = self.live.as_mut().filter(|l| l.sid == sid) else { return false };
+        if live.direct.is_some() {
+            // Transmitted at the next draw; a frame that was still waiting is
+            // simply superseded.
+            live.pending = Some(png_base64);
+            return true;
+        }
+        let Ok(png) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, png_base64.as_bytes()) else {
+            plotly.live_ack(sid);
+            return false;
+        };
         live.frames += 1;
         let key = render::sized_key(sid ^ 0x6c69_7665_6672_616d, live.frames as u16, (live.frames >> 16) as u16);
         // Only the newest frame is worth decoding.
@@ -103,6 +120,7 @@ impl PopoutState {
             images.remove(stale);
         }
         images.ensure_frame(key, png, live.cols, live.rows);
+        false
     }
 
     /// Forward a mouse event to the live figure. With `pixels`, the event's
@@ -142,8 +160,11 @@ impl PopoutState {
     }
 
     fn end_live(&mut self, images: &mut ImageStore, plotly: &mut PlotlySidecar) {
-        if let Some(live) = self.live.take() {
+        if let Some(mut live) = self.live.take() {
             plotly.live_close();
+            if let Some(stream) = &mut live.direct {
+                stream.delete(&mut std::io::stdout());
+            }
             for k in live.shown.into_iter().chain(live.next) {
                 images.remove(k);
             }
@@ -170,16 +191,41 @@ impl PopoutState {
             let font = images.font_size();
             let (w, h) = (u32::from(cols) * u32::from(font.width.max(1)), u32::from(rows) * u32::from(font.height.max(1)));
             let Some(sid) = plotly.live_open(fig, w, h) else { return false };
-            self.live =
-                Some(Live { sid, key, cols, rows, rect: Rect::default(), shown: None, next: None, frames: 0, last_input: None });
+            self.live = Some(Live {
+                sid,
+                key,
+                cols,
+                rows,
+                rect: Rect::default(),
+                direct: images.kitty_direct().then(FrameStream::default),
+                pending: None,
+                shown: None,
+                next: None,
+                frames: 0,
+                last_input: None,
+            });
         }
         let Some(live) = self.live.as_mut() else { return false };
         live.rect = Rect::new(inner.x + (inner.width - cols) / 2, inner.y + (inner.height - rows) / 2, cols, rows);
+        if let Some(stream) = &mut live.direct {
+            // The image goes out ahead of the buffer that places it. The ack
+            // follows once the terminal has taken the bytes, which is what
+            // paces the sidecar to the terminal.
+            if let Some(png) = live.pending.take() {
+                if let Err(e) = stream.transmit(&mut std::io::stdout(), &png, cols, rows) {
+                    tracing::warn!("live frame: {e}");
+                }
+                plotly.live_ack(live.sid);
+            }
+            stream.place(live.rect, buf);
+            return stream.has_frame();
+        }
         // Swap in the newest frame once it is decoded, so there is no gap.
         if let Some(next) = live.next
             && let Some(e) = images.get(next)
             && !matches!(e.state, ImageState::Pending)
         {
+            plotly.live_ack(live.sid);
             if matches!(e.state, ImageState::Ready(_)) {
                 if let Some(old) = live.shown.replace(next) {
                     images.remove(old);

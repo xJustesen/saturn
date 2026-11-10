@@ -53,7 +53,8 @@ pub enum AppEvent {
     PlotlyDone { hash: u64, result: Result<Vec<u8>, String> },
     PlotlyFatal(String),
     /// A frame (or the failure) of the popout's interactive plotly figure.
-    PlotlyLive { sid: u64, result: Result<Vec<u8>, String> },
+    /// The frame is a base64 PNG.
+    PlotlyLive { sid: u64, result: Result<String, String> },
     Kernelspecs(Vec<KernelspecDir>),
     /// From the files picker's scanner and preview worker.
     Files(crate::files::FilesEvent),
@@ -332,8 +333,10 @@ impl App {
             }
             AppEvent::PlotlyLive { sid, result } => match result {
                 Ok(png) => {
-                    if let Some(Overlay::Popout(p)) = &mut self.overlay {
-                        p.live_frame(sid, png, &mut self.images);
+                    if let Some(Overlay::Popout(p)) = &mut self.overlay
+                        && p.live_frame(sid, png, &mut self.images, &self.plotly)
+                    {
+                        self.dirty_ui = true;
                     }
                 }
                 Err(e) => tracing::warn!("plotly live figure: {e}"),

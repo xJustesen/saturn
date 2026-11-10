@@ -4,12 +4,15 @@ request:  {"id": int, "figure": <plotly figure json>, "width": px, "height": px,
 response: {"id": int, "png_base64": str} | {"id": int, "error": str}
 
 Live (interactive) figures use the same pipes. A session is a browser tab
-showing the figure with plotly.js; mouse input is replayed into it and a
-screenshot is sent back whenever the page changes:
+showing the figure with plotly.js; mouse input is replayed into it and the
+browser's screencast sends a frame back whenever the page changes. The browser
+holds the next frame until the last one is acknowledged, so the caller's "ack"
+(sent once a frame is on screen) paces the stream to what it can display:
 
 request:  {"live": "open", "sid": int, "figure": ..., "width": px, "height": px}
           {"live": "input", "sid": int, "type": "move"|"down"|"up"|"wheel",
            "x": px, "y": px, "button": "left"|"middle"|"right"|"none", "dx": px, "dy": px}
+          {"live": "ack", "sid": int}
           {"live": "close", "sid": int}
 response: {"live": sid, "png_base64": str} | {"live": sid, "error": str}
 
@@ -104,14 +107,15 @@ LIVE_JS = """(async (fig, w, h) => {
   document.body.style.overflow = 'hidden';
   document.body.innerHTML = '<div id="g"></div>';
   const layout = Object.assign({}, fig.layout || {}, {width: w, height: h, autosize: false});
-  const config = Object.assign({}, fig.config || {}, {responsive: false, scrollZoom: true, displaylogo: false});
+  // The mode bar is kept visible: fading it in and out with the pointer
+  // would cost a run of full frames each time.
+  const config = Object.assign({displayModeBar: true}, fig.config || {}, {responsive: false, scrollZoom: true, displaylogo: false});
   await Plotly.newPlot('g', fig.data || [], layout, config);
   if (fig.frames && fig.frames.length) await Plotly.addFrames('g', fig.frames);
   return true;
 })"""
 
-SETTLE = 0.04  # seconds between screenshots while the page may still be changing
-QUIET_SHOTS = 4  # unchanged screenshots in a row before a session goes idle
+ACK_TIMEOUT = 1.0  # seconds before a frame is taken as shown without an ack
 DOUBLE_CLICK = 0.4  # seconds
 
 
@@ -134,6 +138,8 @@ class LiveSession:
         self.last_down = (0.0, -1e9, -1e9, "none")
         self.clicks = 1
         self.last_frame = None
+        self.cast_session = None  # the browser's id for the screencast, for acks
+        self.unacked = None  # when the frame the caller has yet to show was sent
 
     async def run(self, req: dict) -> None:
         try:
@@ -170,27 +176,48 @@ class LiveSession:
             raise RuntimeError(text.splitlines()[0])
 
     async def loop(self) -> None:
-        quiet = 0
+        self.tab.subscribe("Page.screencastFrame", self.on_frame)
+        cdp_ok(await self.tab.send_command("Page.startScreencast", {"format": "png", "everyNthFrame": 1}))
         while True:
-            if quiet >= QUIET_SHOTS:
-                ev = await self.queue.get()
-            else:
-                try:
-                    ev = await asyncio.wait_for(self.queue.get(), SETTLE)
-                except asyncio.TimeoutError:
-                    ev = False
-            while ev is not False:
-                if ev is None:
-                    return
-                # Only the last of a run of moves matters.
-                if not (ev.get("type") == "move" and self.next_is_move()):
-                    await self.dispatch(ev)
-                quiet = 0
-                ev = self.queue.get_nowait() if not self.queue.empty() else False
-            if await self.shoot():
-                quiet = 0
-            else:
-                quiet += 1
+            try:
+                ev = await asyncio.wait_for(self.queue.get(), ACK_TIMEOUT)
+            except asyncio.TimeoutError:
+                if self.unacked is not None and time.monotonic() - self.unacked > ACK_TIMEOUT:
+                    await self.release()
+                continue
+            if ev is None:
+                return
+            if ev.get("live") == "ack":
+                await self.release()
+            # Only the last of a run of moves matters.
+            elif not (ev.get("type") == "move" and self.next_is_move()):
+                await self.dispatch(ev)
+
+    async def on_frame(self, ev: dict) -> None:
+        """A screencast frame: pass it on, or release it at once if nothing changed."""
+        try:
+            params = ev.get("params", {})
+            self.cast_session = params.get("sessionId")
+            data = params.get("data")
+            if not data or data == self.last_frame:
+                self.unacked = None
+                await self.ack_browser()
+                return
+            self.last_frame = data
+            self.unacked = time.monotonic()
+            emit(self.out, {"live": self.sid, "png_base64": data})
+        except Exception as e:
+            emit(self.out, {"live": self.sid, "error": f"{type(e).__name__}: {e}"[:400]})
+
+    async def release(self) -> None:
+        """The caller has shown the last frame: let the browser send the next."""
+        if self.unacked is not None:
+            self.unacked = None
+            await self.ack_browser()
+
+    async def ack_browser(self) -> None:
+        if self.tab is not None and self.cast_session is not None:
+            await self.tab.send_command("Page.screencastFrameAck", {"sessionId": self.cast_session})
 
     def next_is_move(self) -> bool:
         q = self.queue._queue  # peek; asyncio.Queue has no public way
@@ -222,18 +249,6 @@ class LiveSession:
         else:
             return
         cdp_ok(await self.tab.send_command("Input.dispatchMouseEvent", params))
-
-    async def shoot(self) -> bool:
-        """Screenshot the tab; send it if it differs from the last one sent."""
-        res = cdp_ok(
-            await self.tab.send_command("Page.captureScreenshot", {"format": "png", "optimizeForSpeed": True})
-        )
-        data = res.get("data")
-        if not data or data == self.last_frame:
-            return False
-        self.last_frame = data
-        emit(self.out, {"live": self.sid, "png_base64": data})
-        return True
 
     async def close_tab(self) -> None:
         tab, self.tab = self.tab, None
