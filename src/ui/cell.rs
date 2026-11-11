@@ -184,11 +184,21 @@ pub fn render(
                 .selection_style(Style::default().bg(theme.ui.selection))
                 .line_numbers_style(Style::default().fg(theme.ui.line_numbers))
                 .hide_status_line();
+            let mut search = Style::default().bg(theme.ui.search_bg);
+            if let Some(fg) = theme.ui.search_fg {
+                search = search.fg(fg);
+            }
+            ed.decorate(Style::default().bg(theme.ui.selection), search);
+            let numbers = match (ctx.line_numbers, ctx.cfg.relative_numbers) {
+                (false, _) => LineNumbers::None,
+                (true, true) => LineNumbers::Relative,
+                (true, false) => LineNumbers::Absolute,
+            };
             let mut view = EditorView::new(&mut ed.state)
                 .theme(ed_theme)
                 .wrap(wrap)
                 .tab_width(tab)
-                .line_numbers(if ctx.line_numbers { LineNumbers::Absolute } else { LineNumbers::None });
+                .line_numbers(numbers);
             let ext = if cell.kind == CellKind::Markdown { "md" } else { ctx.lang_ext };
             if let Some(syntax) = crate::syntax::by_extension(ext) {
                 let h = SyntaxHighlighter::with_sets(

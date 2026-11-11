@@ -124,7 +124,27 @@ terminals send it as `Tab`, so use `Alt+I` there or set `show_ignored` in the co
 `Alt+H` and `Alt+I` also work when the terminal sends Option as Meta. The file-type
 icons need a Nerd Font (Ghostty includes one); `icons = false` turns them off.
 
-Inside a cell the editor is vim-modal (`hjkl`, `dd`, `yy`, `p`, `ciw`, `v`, `/`, `u`, …).
+Inside a cell the editor speaks vim's grammar, `[count]["reg]operator[count]motion`,
+with LazyVim's defaults where they differ from plain vim:
+
+| | |
+|---|---|
+| Motions | `h j k l` `w b e ge` `W B E` `0 ^ $ g_` `gg G` `{ }` `%` `f F t T ; ,` `H M L` `+ -` `[( ])` `Ctrl+D/U` |
+| Operators | `d c y` `> <` `gu gU g~` `gc` (comment), doubled for lines (`dd`, `gcc`, `>>`) |
+| Text objects | `iw aw` `i( a(` `i[` `i{` `i"` `i'` `ip`, plus mini.ai's `q` quote, `b` bracket, `a` argument, `u`/`U` call, `f` function, `c` class, `i` indent, `g` whole cell, `d` digits |
+| Edits | `x X D C s S r R ~ J gJ` `p P gp` `o O` `Ctrl+A/X` `.` `u` `Ctrl+R` `Alt+J/K` (move line) |
+| Visual | `v` `V` `Ctrl+V` (with `I`/`A`/`c`), `o`, `gv`; `<` and `>` keep the selection |
+| Registers | `"a`–`"z` (`"A` appends), `"0`, `"1`–`"9`, `"-`, `"_`; the unnamed register is the system clipboard |
+| Search | `/` `?` `n` `N` `*` `#` (regex, smartcase), also as motions: `d/foo` |
+| Marks, macros | `m{a-z}` `'a` `` `a `` `''`; `q{a-z}` `@a` `@@` |
+| Command line | `:s/a/b/g` `:%s/…` `:'<,'>s/…` `:N` `:noh` `:w` `:q` `:wq` (`ZZ`) |
+
+Typing inserts closing brackets and quotes (`auto_pairs = false` turns that off),
+`Enter` keeps the indent and deepens it after `:` or an open bracket, and `Tab`
+inserts spaces. Registers, the last search and `.` are shared between cells. Not
+implemented: the jumplist (`Ctrl+O` opens the file picker), `gj`/`gk` by display
+line, folds and LazyVim's flash `s` jump (`s` is vim's substitute).
+
 `Shift+Enter`, `Ctrl+Enter`, `Alt+Enter`, `Ctrl+S`, `Ctrl+P`, `Ctrl+C` and `Ctrl+Q`
 work in every mode. Shift+Enter needs a terminal with the kitty keyboard protocol
 (Ghostty, Kitty, WezTerm, foot); elsewhere use `Alt+Enter` or `Ctrl+Enter`.
@@ -160,7 +180,9 @@ persist_plotly_png = true      # store sidecar PNGs in the notebook so they surv
 plotly_scale = 2.0             # pixel scale for plotly renders
 theme = "tokyo-night"          # see Themes below
 line_numbers = false
-tab_width = 4
+relative_numbers = true   # with line_numbers: relative to the cursor
+tab_width = 4              # also the indent width (shiftwidth)
+auto_pairs = true
 wrap = true
 show_hidden = false            # files picker: list dot-named files and folders (Ctrl+H)
 show_ignored = false           # files picker: list .gitignored files (Ctrl+I); notebooks always show

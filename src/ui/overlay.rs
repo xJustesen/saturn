@@ -305,9 +305,11 @@ NOTEBOOK (command mode)            CELL EDITING
   gg / G         first / last cell    i       edit cell (insert mode)
   gt             go to cell (picker)
   Ctrl+D / U     half page           Esc     normal → back to notebook
-  Ctrl+E / Y     scroll a line       (vim: hjkl, dd, yy, p, ciw, v, /, u …)
-  a / b          insert above/below
-  dd / x / c     delete / cut / copy   RUN
+  Ctrl+E / Y     scroll a line       vim grammar: counts, operators,
+  a / b          insert above/below   motions, text objects, registers,
+  dd / x / c     delete / cut / copy  visual modes, . repeat, macros,
+                                      / ? * # search, :s, gc comments
+                                    RUN
   v / V          paste below/above    Shift+Enter  run & advance
   Ctrl+K / J     move cell up/down    Ctrl+Enter   run
   m / y / r      → markdown/code/raw  Alt+Enter    run & insert below

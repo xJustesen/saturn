@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::style::Print;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
-use edtui::EditorMode;
 use futures::StreamExt;
 use jupyter_zmq_client::KernelspecDir;
 use ratatui::Terminal;
@@ -21,7 +20,8 @@ use crate::Opts;
 use crate::commands::{Command, PALETTE};
 use crate::config::Config;
 use crate::theme::Theme;
-use crate::editor::{CellEditor, language_extension};
+use crate::editor::{CellEditor, comment_leader, language_extension};
+use crate::vim::Request;
 use crate::files::projects::Project;
 use crate::files::{FileEntry, PickerPrefs};
 use crate::files::preview::{PreviewWorker, UiColors};
@@ -613,12 +613,22 @@ impl App {
             self.mode = Mode::Command;
             return;
         };
-        if key.code == KeyCode::Esc && ed.mode() == EditorMode::Normal {
+        if key.code == KeyCode::Esc && ed.at_rest() {
+            crate::vim::clear_search_highlight();
             self.leave_edit();
             return;
         }
+        ed.vim.page = (self.view.height as usize / 2).max(1);
         ed.key(key);
+        let requests = ed.take_requests();
         self.after_edit();
+        for r in requests {
+            match r {
+                Request::Save => self.dispatch(Command::Save),
+                Request::Leave => self.leave_edit(),
+                Request::Message(m) => self.flash(m),
+            }
+        }
     }
 
     fn on_overlay_key(&mut self, key: KeyEvent) {
@@ -1134,7 +1144,10 @@ impl App {
         let Some(cell) = self.nb.cells.get_mut(idx) else { return };
         let snapshot = cell.clone();
         let ed = cell.editor.get_or_insert_with(|| CellEditor::new(&snapshot.source));
-        ed.set_mode(if insert { EditorMode::Insert } else { EditorMode::Normal });
+        ed.vim.shiftwidth = self.cfg.tab_width.max(1);
+        ed.vim.autopairs = self.cfg.auto_pairs;
+        ed.vim.comment = comment_leader(if snapshot.kind == CellKind::Code { self.lang_ext.as_str() } else { "" }).to_string();
+        if insert { ed.enter_insert() } else { ed.enter_normal() }
         self.edit_snapshot = Some((idx, snapshot));
         self.mode = Mode::Edit;
         self.pending.clear();
@@ -1152,7 +1165,7 @@ impl App {
                 self.nb.dirty = true;
             }
             if let Some(ed) = cell.editor.as_mut() {
-                ed.set_mode(EditorMode::Normal);
+                ed.enter_normal();
             }
             if let Some((sidx, before)) = self.edit_snapshot.take()
                 && sidx == idx

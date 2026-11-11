@@ -1,6 +1,5 @@
 //! Bottom status line: mode, document, kernel, pending keys, flash messages.
 
-use edtui::EditorMode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -8,6 +7,7 @@ use ratatui::text::{Line, Span};
 
 use crate::app::{App, Mode, Screen};
 use crate::kernel::KernelStatus;
+use crate::vim::Mode as VimMode;
 
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
@@ -30,16 +30,23 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     let t = &app.theme;
     let ui = &t.ui;
     buf.set_style(area, Style::default().bg(ui.status_bg).fg(ui.status_fg));
+    let editor = match app.mode {
+        Mode::Edit => app.nb.cells.get(app.focused).and_then(|c| c.editor.as_ref()),
+        Mode::Command => None,
+    };
     let mode = |label: &'static str, bg: Color| (label, Style::default().bg(bg).fg(ui.mode_fg).add_modifier(Modifier::BOLD));
     let (mode_label, mode_style) = match app.mode {
         Mode::Command if app.search.input.is_some() => mode(" SEARCH ", ui.mode_search),
         Mode::Command => mode(" COMMAND ", ui.mode_command),
         Mode::Edit => {
-            let m = app.nb.cells.get(app.focused).and_then(|c| c.editor.as_ref()).map(|e| e.mode());
-            match m {
-                Some(EditorMode::Insert) => mode(" INSERT ", ui.mode_insert),
-                Some(EditorMode::Visual) => mode(" VISUAL ", ui.mode_visual),
-                Some(EditorMode::Search) => mode(" SEARCH ", ui.mode_search),
+            match editor.map(|e| (e.mode(), e.vim.cmdline().map(|c| c.starts_with(':')))) {
+                Some((_, Some(true))) => mode(" EX ", ui.mode_search),
+                Some((_, Some(false))) => mode(" SEARCH ", ui.mode_search),
+                Some((VimMode::Insert, _)) => mode(" INSERT ", ui.mode_insert),
+                Some((VimMode::Replace, _)) => mode(" REPLACE ", ui.mode_insert),
+                Some((VimMode::Visual, _)) => mode(" VISUAL ", ui.mode_visual),
+                Some((VimMode::VisualLine, _)) => mode(" V-LINE ", ui.mode_visual),
+                Some((VimMode::VisualBlock, _)) => mode(" V-BLOCK ", ui.mode_visual),
                 _ => mode(" NORMAL ", ui.mode_normal),
             }
         }
@@ -69,6 +76,13 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
         buf.set_line(area.x, area.y, &Line::from(left), area.width);
         return;
     }
+    if let Some(cmd) = editor.and_then(|e| e.vim.cmdline()) {
+        // The editor's `/`, `?` or `:` prompt takes the line, like vim's.
+        left.push(Span::raw(cmd));
+        left.push(Span::styled("▏", t.muted()));
+        buf.set_line(area.x, area.y, &Line::from(left), area.width);
+        return;
+    }
     let title = app.nb.title();
     left.push(Span::styled(title, Style::default().add_modifier(Modifier::BOLD)));
     if app.nb.dirty {
@@ -77,6 +91,14 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     left.push(Span::styled(format!("  cell {}/{}", app.focused + 1, app.nb.cells.len()), t.muted()));
     if !app.pending.is_empty() {
         left.push(Span::styled(format!("  {}", crate::keymap::describe(&app.pending)), Style::default().fg(ui.warning)));
+    }
+    if let Some(ed) = editor {
+        if let Some(reg) = ed.vim.recording() {
+            left.push(Span::styled(format!("  recording @{reg}"), Style::default().fg(ui.warning)));
+        }
+        if !ed.vim.pending().is_empty() {
+            left.push(Span::styled(format!("  {}", ed.vim.pending()), Style::default().fg(ui.warning)));
+        }
     }
     if app.search.active() {
         left.push(Span::styled(format!("  /{} {}", app.search.query, search_count(app)), t.muted()));

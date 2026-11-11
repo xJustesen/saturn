@@ -264,6 +264,7 @@ async fn run(opts: Opts, log_path: PathBuf) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
+    saturn::editor::install_system_clipboard();
     let app = app::App::new(opts, cfg, picker, log_path).await?;
     app.run(&mut terminal).await
 }

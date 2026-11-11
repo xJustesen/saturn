@@ -29,6 +29,11 @@ pub struct Config {
     pub line_numbers: bool,
     /// Tab width used by the editor.
     pub tab_width: usize,
+    /// With `line_numbers`: number lines relative to the cursor, as vim's
+    /// `relativenumber` does.
+    pub relative_numbers: bool,
+    /// Insert the closing bracket or quote while typing in a cell.
+    pub auto_pairs: bool,
     /// Wrap long lines in cells.
     pub wrap: bool,
     /// Files picker: list hidden files and folders (dot names). Toggle with Ctrl+H.
@@ -55,6 +60,8 @@ impl Default for Config {
             theme: "tokyo-night".to_string(),
             line_numbers: false,
             tab_width: 4,
+            relative_numbers: true,
+            auto_pairs: true,
             wrap: true,
             show_hidden: false,
             show_ignored: false,

@@ -14,6 +14,7 @@ pub mod search;
 pub mod syntax;
 pub mod theme;
 pub mod ui;
+pub mod vim;
 
 use std::path::PathBuf;
 

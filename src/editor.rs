@@ -1,53 +1,140 @@
-//! Per-cell text editor: a thin wrapper around edtui (vim-modal) plus the
-//! wrapped-row maths the layout needs (edtui keeps its viewport private).
+//! Per-cell text editor: the vim engine (`crate::vim`) owns the text and the
+//! keys, edtui draws it. Also the wrapped-row maths the layout needs (edtui
+//! keeps its viewport private).
 
 use crossterm::event::KeyEvent;
-use edtui::{EditorEventHandler, EditorMode, EditorState, Lines};
+use edtui::{EditorMode, EditorState, Highlight, Index2, Lines};
+use ratatui::style::Style;
 use unicode_width::UnicodeWidthChar;
 
+use crate::vim::{self, K, Mode, Request, Vim};
+
 pub struct CellEditor {
+    /// What edtui draws: a mirror of `vim`, refreshed after every key.
     pub state: EditorState,
-    handler: EditorEventHandler,
+    pub vim: Vim,
+}
+
+struct SystemClipboard(arboard::Clipboard);
+
+impl vim::Clip for SystemClipboard {
+    fn get(&mut self) -> Option<String> {
+        self.0.get_text().ok()
+    }
+    fn set(&mut self, text: &str) {
+        let _ = self.0.set_text(text.to_string());
+    }
+}
+
+/// Yank, delete and paste through the system clipboard, as with nvim's
+/// `clipboard=unnamedplus`. Without a clipboard the registers stay in memory.
+pub fn install_system_clipboard() {
+    if let Ok(c) = arboard::Clipboard::new() {
+        vim::set_clipboard(Box::new(SystemClipboard(c)));
+    }
+}
+
+/// Line comment leader for `gc`, by syntect file extension.
+pub fn comment_leader(ext: &str) -> &'static str {
+    match ext {
+        "rs" | "js" | "ts" | "c" | "cpp" | "go" | "scala" => "//",
+        "sql" | "hs" => "--",
+        "ml" => "(*",
+        _ => "#",
+    }
+}
+
+fn idx(p: vim::Pos) -> Index2 {
+    Index2::new(p.row, p.col)
 }
 
 impl CellEditor {
     pub fn new(source: &str) -> Self {
-        let mut state = EditorState::new(Lines::from(source));
-        state.mode = EditorMode::Normal;
-        CellEditor { state, handler: EditorEventHandler::default() }
+        let mut ed = CellEditor { state: EditorState::new(Lines::from(source)), vim: Vim::new(source) };
+        ed.sync();
+        ed
+    }
+
+    /// Mirror the engine's text, cursor, mode and selection into edtui.
+    fn sync(&mut self) {
+        let v = &self.vim;
+        self.state.lines = Lines::new(v.text.clone());
+        self.state.cursor = idx(v.cur);
+        self.state.mode = match v.mode {
+            Mode::Insert | Mode::Replace => EditorMode::Insert,
+            Mode::Normal => EditorMode::Normal,
+            _ => EditorMode::Visual,
+        };
+        // edtui's selection type is private: selections are drawn as
+        // highlights instead (see `decorate`).
+        self.state.selection = None;
+    }
+
+    /// Per-frame highlights: search matches and the visual selection.
+    pub fn decorate(&mut self, selection: Style, search: Style) {
+        let v = &self.vim;
+        let mut hl = Vec::new();
+        for (p, n) in v.search_matches() {
+            hl.push(Highlight::new(idx(p), Index2::new(p.row, p.col + n - 1), search));
+        }
+        if let Some(r) = v.selection() {
+            for (row, start, end) in v.spans(&r) {
+                if end > start {
+                    hl.push(Highlight::new(Index2::new(row, start), Index2::new(row, end - 1), selection));
+                }
+            }
+        }
+        self.state.highlights = hl;
     }
 
     pub fn text(&self) -> String {
-        self.state.lines.flatten(&Some('\n')).into_iter().collect()
+        self.vim.text()
     }
 
     pub fn key(&mut self, key: KeyEvent) {
-        self.handler.on_key_event(key, &mut self.state);
-    }
-
-    pub fn paste(&mut self, text: String) {
-        self.handler.on_paste_event(text, &mut self.state);
-    }
-
-    pub fn mode(&self) -> EditorMode {
-        self.state.mode
-    }
-
-    pub fn set_mode(&mut self, mode: EditorMode) {
-        self.state.mode = mode;
-    }
-
-    pub fn cursor_to_end(&mut self) {
-        let rows = self.state.lines.len();
-        if rows > 0 {
-            let row = rows - 1;
-            let col = self.state.lines.len_col(row).unwrap_or(0);
-            self.state.cursor = edtui::Index2::new(row, col);
+        if let Some(k) = K::from_event(&key) {
+            self.vim.key(k);
+            self.sync();
         }
     }
 
+    pub fn paste(&mut self, text: String) {
+        self.vim.paste(&text);
+        self.sync();
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.vim.mode
+    }
+
+    /// Normal mode with no command half-typed: `Esc` leaves the cell.
+    pub fn at_rest(&self) -> bool {
+        self.vim.at_rest()
+    }
+
+    pub fn enter_insert(&mut self) {
+        self.vim.enter_insert();
+        self.sync();
+    }
+
+    pub fn enter_normal(&mut self) {
+        self.vim.enter_normal();
+        self.sync();
+    }
+
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        self.vim.take_requests()
+    }
+
+    pub fn cursor_to_end(&mut self) {
+        let row = self.vim.text.len() - 1;
+        self.vim.cur = vim::Pos { row, col: self.vim.text[row].len() };
+        self.sync();
+    }
+
     pub fn cursor_to_start(&mut self) {
-        self.state.cursor = edtui::Index2::new(0, 0);
+        self.vim.cur = vim::Pos::default();
+        self.sync();
     }
 
     pub fn line_count(&self) -> usize {

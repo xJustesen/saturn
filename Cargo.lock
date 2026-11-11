@@ -2334,6 +2334,7 @@ version = "0.1.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
+ "arboard",
  "base64 0.22.1",
  "blake3",
  "crossterm",
@@ -2350,6 +2351,7 @@ dependencies = [
  "open",
  "ratatui",
  "ratatui-image",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

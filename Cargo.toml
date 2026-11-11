@@ -40,6 +40,8 @@ tracing-appender = "0.2"
 anyhow = "1"
 libc = "0.2"
 open = "5"
+regex = "1"
+arboard = { version = "3", default-features = false }
 
 [profile.release]
 lto = "fat"
