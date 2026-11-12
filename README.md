@@ -1,286 +1,95 @@
 # saturn
 
-A blazingly fast, keyboard-first Jupyter notebook for the terminal.
+<div align="center"><pre>
+        ·                            ·        
+     ⢀⡠⠤⠒⠒⣊⡩⠭⠭⢭⣭⣭⣭⣭⣭⠷⣶⠶⠦⠤⢤⣀⣀                  
+✦  ⢀⠔⠁⢀⠤⣊⠭⠒⠊⠉⣉⣁⣤⣤⠞⣿  ⠙⠶⣤⣤⣀⣠⡽⠻⡵⣒⠤⢄⡀            
+   ⡇ ⢀⠇⡜  ⢀⡴⠛⡩⠛⣹⡇ ⠈⠛⢦⣤⣀⡀ ⠉⠁  ⣸⣶⡫⢕⡪⣑⠢⢄⡀        
+   ⢱ ⠈⡆⢇  ⢸⡇⡎ ⢰⠁⠙⢦⣄⡀  ⠉⠙⠛⠛⠛⠛⠛⠉⠈⣷⣤⡈⠑⠭⡢⣈⠒⢄      
+    ⠑⢄⠈⢎⠢⡀ ⠻⣌⢆⢸⢧⡀ ⠈⠙⠛⠶⢦⣤⣤⣄⣀⣠⣤⣤⠶⡇⠱⡙⣦ ⠈⠢⡱⡀⠑⢄    
+      ⠑⠤⡉⠪⣒⢄⡈⠛⢯⣷⣿⣷⣦⣤⣀⡀   ⠈⠉⠁  ⣠⠇ ⡸⢸⡇  ⢱⠸⡀ ⢇   
+        ⠈⠑⠢⢍⡪⢕⣢⠬⣙⠛⠿⢿⣿⣿⣿⣿⣷⣶⣶⣶⣿⣿⣏⣤⣊⣤⠞⠁  ⡜⢰⠁ ⢸   
+            ⠈⠑⠒⠭⢞⣻⠿⢶⣦⣬⣭⣉⣛⣛⣛⠛⠛⠛⠛⢉⣉⣀⡠⠤⣒⡩⠒⠁⢀⠔⠁ ✦ 
+  ·               ⠉⠉⠒⠚⠫⠭⠿⢟⣛⣛⣛⣛⣛⣓⣒⣒⣊⡩⠤⠤⠒⠊⠁     
+</pre></div>
 
-- Opens, edits, runs and saves `.ipynb` files (nbformat 4.5, byte-stable round trips).
-- Talks to any Jupyter kernel directly over ZeroMQ (no Jupyter server needed).
-- Inline figures: matplotlib PNGs and plotly figures, drawn with the Kitty graphics
-  protocol (Ghostty, Kitty, WezTerm), iTerm2 or Sixel, falling back to unicode halfblocks
-  (e.g. inside tmux).
-- Vim-modal editing inside cells, Jupyter-style cell commands around them.
-- Fuzzy command palette, files picker with preview, and kernel picker.
+A fast, keyboard-first Jupyter notebook for the terminal.
+
+- Edits and runs `.ipynb` files against any Jupyter kernel, over ZeroMQ (no Jupyter server).
+- Inline matplotlib and plotly figures (Kitty graphics, iTerm2, Sixel, or halfblocks in tmux).
+  Plotly figures are interactive in the `z` popout.
+- Vim editing inside cells, Jupyter-style commands around them.
+- Command palette, fuzzy file picker with preview, kernel picker, themes.
 
 ## Install
 
 ```bash
-make install            # release build, installed to ~/.local/bin
-make install PREFIX=/usr/local
+make install    # builds and installs to ~/.local/bin (PREFIX=... to change)
 ```
 
-`make install` puts the binary in `~/.local/bin`, and `cargo install` puts a second copy in
-`~/.cargo/bin`. When `~/.cargo/bin` comes first on `PATH`, that copy hides the other.
-
-Requires a Rust toolchain. Kernels are discovered from the usual Jupyter data
-directories, from `uv tool` installs (e.g. `uv tool install jupyterlab`) and from
-`$VIRTUAL_ENV`; add more with `SATURN_KERNEL_DIRS=/path/to/share/jupyter:...`.
-
-Plotly figures that arrive without a PNG are rendered by a sidecar started
-with `uv run --no-project --with plotly --with kaleido` (needs `uv` and Chrome/Chromium).
-It keeps one headless Chrome for the whole session, so after the first figure
-(which pays for the browser launch) renders take tens of milliseconds. The sidecar
-is started early when the notebook already holds plotly outputs or a code cell
-mentions plotly, and otherwise on first use.
-It runs in its own throwaway environment, so it never touches the notebook project's
-`uv.lock` or `.venv`, and the project's plotly version doesn't matter.
-If the kernel environment has `kaleido` installed, plotly emits PNGs itself and the
-sidecar is never started.
+Needs a Rust toolchain. Avoid `cargo install`: its copy in `~/.cargo/bin` can hide this one.
+Plotly figures without a PNG are rendered by a sidecar that needs `uv` and Chrome.
 
 ## Usage
 
 ```bash
-saturn notebook.ipynb        # open a notebook (kernel from its metadata)
-saturn                       # list the files of the git repository (or of the directory) in the files picker
-saturn dir/ --kernel python3 # the same for dir/, and force a kernelspec name
+saturn notebook.ipynb           # open a notebook
+saturn [dir/]                   # pick a notebook in the files picker
+saturn nb.ipynb --kernel python3
 ```
 
-Logs go to `~/Library/Caches/saturn/saturn.log` (or `$XDG_CACHE_HOME/saturn`);
-`SATURN_LOG=debug` raises the level. Kernel stdout/stderr land in
-`kernel-<name>.log` next to it.
+Logs: `~/Library/Caches/saturn/saturn.log` (or `$XDG_CACHE_HOME/saturn`); `SATURN_LOG=debug` for more.
+Extra kernel dirs: `SATURN_KERNEL_DIRS=/path/to/share/jupyter:...`.
 
 ## Keys
 
-Notebook (command mode):
+Press `?` in saturn for the full list. The essentials:
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `j` / `k`, `↓` / `↑` | focus next / previous cell | `Enter` / `i` | edit cell (vim normal / insert) |
-| `gg` / `G` / `gt` | first / last / go to cell (picker) | `Esc` | (in vim normal mode) back to notebook |
-| `Ctrl+D` / `Ctrl+U` | half page down / up | `Shift+Enter` | run and advance |
-| `a` / `b` | insert cell above / below | `Ctrl+Enter` | run |
-| `dd` / `x` / `c` | delete / cut / copy cell | `Alt+Enter` | run and insert below |
-| `v` / `V` | paste below / above | `Ctrl+C` / `I` | interrupt kernel |
-| `Ctrl+K` / `Ctrl+J` | move cell up / down | `00` | restart kernel |
-| `m` / `y` / `r` | to markdown / code / raw | `K` | select kernel |
-| `M` | merge with cell below | `Ctrl+S` | save |
-| `Ctrl+_` | split cell at cursor (while editing) | `Ctrl+O` | find file (picker with preview) |
-| `u` / `Ctrl+R` | undo / redo cell operation | `Ctrl+P` | command palette |
-| `o` / `O` | toggle (or expand) / clear outputs | `?` | help |
-| `z` | inspect output in a popout | `q` | quit |
-| `/` | search the notebook | `n` / `N` | next / previous match |
-
-`gt` opens a picker that lists every cell on one row: its number, the first line
-of its source, and a glyph plus excerpt for its output (`≡` stream, `▤` result or
-table, `▦` figure with its pixel size, `✗` error with the exception name). Cells
-currently on screen carry a band and the focused cell a bar; a failed cell is drawn
-in the error colour, a running one in the warning colour. Type digits to jump to a
-cell number, letters to fuzzy-filter on source and output text (`gt fig` lists the
-figure cells), `j`/`k` or the arrows to move while nothing is typed, `Enter` to go,
-`Esc` to cancel.
-
-`/` searches every cell's text as it is shown (code, markdown, raw) and jumps to
-the first match while you type, like vim's incremental search. `Enter` keeps the
-position, `Esc` goes back to where you were, `Ctrl+G`/`Ctrl+T` step through the
-matches from the prompt. `n` / `N` repeat the search forwards / backwards, wrapping
-around the notebook. The pattern is plain text with smart case (all lowercase
-matches any case). `Esc` in command mode clears the highlights; `n` brings them back.
-
-### Files picker
-
-`Ctrl+O` (and `saturn` or `saturn dir/` without a notebook) opens the files picker:
-every file under the root in one flat list on the left, narrowed by fuzzy-matching
-what you type against the path, and a preview of the selected file on the right.
-The root is the git repository that holds the open notebook's folder (or the
-current directory), or that folder itself outside a repository; it stays fixed
-while the picker is open. To list another folder, start saturn there.
-
-Files matched by `.gitignore` (and `.git/info/exclude` and git's global excludes
-file) and hidden (dot-named) files and folders are left out by default; `.git`,
-`node_modules`, virtual environments, `__pycache__`, cache folders (those holding a
-`CACHEDIR.TAG`, such as Cargo's `target/`) and `~/Library` are never listed.
-Notebooks are always listed, even inside gitignored folders. Very large roots (such
-as `~`) stop at 50,000 listed files; the counter then shows a `+`.
-
-Text files are previewed highlighted, with line numbers (the first 1,000 lines; files
-over 256 KB get no preview). Notebooks are previewed as their code and markdown cells,
-without outputs. Binary files, special files and folders get a one-line note.
-`Enter` on a notebook opens it (asking first if the open notebook has unsaved changes;
-answering no reopens the picker); on any other file it only says that saturn opens
-`.ipynb` files.
-
-| Key | Action |
-|---|---|
-| typing (including `j` and `k`) | edit the query |
-| `↑` / `↓`, `Ctrl+P` / `Ctrl+N`, `Ctrl+K` / `Ctrl+J`, `Tab` / `Shift+Tab` | move |
-| `PgUp` / `PgDn` | move by a page |
-| `Enter` | open the notebook |
-| `Ctrl+U` | clear the query |
-| `Ctrl+F` / `Ctrl+B` | scroll the preview |
-| `Ctrl+H` | show hidden files (scans again) |
-| `Ctrl+I` | show ignored files |
-| `Esc` | close |
-
-`Ctrl+I` needs the kitty keyboard protocol (Ghostty, Kitty, WezTerm, foot); other
-terminals send it as `Tab`, so use `Alt+I` there or set `show_ignored` in the config.
-`Alt+H` and `Alt+I` also work when the terminal sends Option as Meta. The file-type
-icons need a Nerd Font (Ghostty includes one); `icons = false` turns them off.
-
-Inside a cell the editor speaks vim's grammar, `[count]["reg]operator[count]motion`,
-with LazyVim's defaults where they differ from plain vim:
-
-| | |
-|---|---|
-| Motions | `h j k l` `w b e ge` `W B E` `0 ^ $ g_` `gg G` `{ }` `%` `f F t T ; ,` `H M L` `+ -` `[( ])` `Ctrl+D/U` |
-| Operators | `d c y` `> <` `gu gU g~` `gc` (comment), doubled for lines (`dd`, `gcc`, `>>`) |
-| Text objects | `iw aw` `i( a(` `i[` `i{` `i"` `i'` `ip`, plus mini.ai's `q` quote, `b` bracket, `a` argument, `u`/`U` call, `f` function, `c` class, `i` indent, `g` whole cell, `d` digits |
-| Edits | `x X D C s S r R ~ J gJ` `p P gp` `o O` `Ctrl+A/X` `.` `u` `Ctrl+R` `Alt+J/K` (move line) |
-| Visual | `v` `V` `Ctrl+V` (with `I`/`A`/`c`), `o`, `gv`; `<` and `>` keep the selection |
-| Registers | `"a`–`"z` (`"A` appends), `"0`, `"1`–`"9`, `"-`, `"_`; the unnamed register is the system clipboard |
-| Search | `/` `?` `n` `N` `*` `#` (regex, smartcase), also as motions: `d/foo` |
-| Marks, macros | `m{a-z}` `'a` `` `a `` `''`; `q{a-z}` `@a` `@@` |
-| Command line | `:s/a/b/g` `:%s/…` `:'<,'>s/…` `:N` `:noh` `:w` `:q` `:wq` (`ZZ`) |
-
-Typing inserts closing brackets and quotes (`auto_pairs = false` turns that off),
-`Enter` keeps the indent and deepens it after `:` or an open bracket, and `Tab`
-inserts spaces. Registers, the last search and `.` are shared between cells. Not
-implemented: the jumplist (`Ctrl+O` opens the file picker), `gj`/`gk` by display
-line, folds and LazyVim's flash `s` jump (`s` is vim's substitute).
-
-`Shift+Enter`, `Ctrl+Enter`, `Alt+Enter`, `Ctrl+S`, `Ctrl+P`, `Ctrl+C` and `Ctrl+Q`
-work in every mode. Shift+Enter needs a terminal with the kitty keyboard protocol
-(Ghostty, Kitty, WezTerm, foot); elsewhere use `Alt+Enter` or `Ctrl+Enter`.
-
-With a plotly figure that could not be rendered, `o` writes its HTML to the cache
-directory and opens it in the browser.
-
-`z` opens the focused cell's output in a popout that fills the terminal and follows
-it when it is resized. Figures are drawn as large as the popout allows: plotly figures
-are re-rendered by the sidecar at the popout's pixel size, PNGs are scaled up (at most
-4×). Text outputs are shown in full, without truncation. Inside the popout: `j`/`k`,
-`Ctrl+D`/`Ctrl+U`, `g`/`G` scroll, `w` toggles wrapping, `h`/`l` pan when unwrapped,
-`Tab`/`Shift+Tab` (or `n`/`p`) switch between the cell's outputs, `Esc`/`q`/`z` close.
-
-A plotly figure in the popout is interactive: it runs as a live page in the sidecar's
-browser, the mouse is forwarded to it and the page is redrawn as it changes. Hover
-shows data labels, dropdowns, buttons, sliders, the legend and the mode bar respond to
-clicks, dragging zooms, the wheel zooms too, and a double-click resets the axes. Mouse
-reporting is only switched on while such a figure is showing, so the terminal's own
-text selection works everywhere else. Terminals with SGR-pixel mouse reporting
-(Ghostty, kitty, foot, WezTerm) give pixel-precise positions; elsewhere the pointer
-snaps to the centre of the cell under it.
+| `j` / `k` | next / previous cell | `Enter` / `i` | edit cell |
+| `a` / `b` | insert cell above / below | `Esc` | leave the cell |
+| `dd` / `x` / `c` / `v` | delete / cut / copy / paste | `Shift+Enter` | run and advance |
+| `m` / `y` | to markdown / code | `Ctrl+C` / `00` | interrupt / restart kernel |
+| `gt` | go to cell (picker) | `K` | select kernel |
+| `/` | search | `Ctrl+O` | open file |
+| `z` | output popout | `Ctrl+P` | command palette |
+| `u` / `Ctrl+R` | undo / redo | `Ctrl+S` / `q` | save / quit |
 
 ## Configuration
 
-`~/.config/saturn/config.toml` (all keys optional):
+`~/.config/saturn/config.toml` (also on macOS). Every key is optional:
 
 ```toml
-max_image_rows = 20            # tallest inline image, in rows
-max_image_rows_halfblocks = 12 # same when only halfblocks are available
-stream_max_lines = 500         # longer outputs are truncated until expanded with `o`
-persist_plotly_png = true      # store sidecar PNGs in the notebook so they survive
-plotly_scale = 2.0             # pixel scale for plotly renders
-theme = "tokyo-night"          # see Themes below
+theme = "tokyo-night"
 line_numbers = false
-relative_numbers = true   # with line_numbers: relative to the cursor
-tab_width = 4              # also the indent width (shiftwidth)
+relative_numbers = true
+tab_width = 4
 auto_pairs = true
 wrap = true
-show_hidden = false            # files picker: list dot-named files and folders (Ctrl+H)
-show_ignored = false           # files picker: list .gitignored files (Ctrl+I); notebooks always show
-icons = true                   # files picker: Nerd Font file-type icons
+max_image_rows = 20
+stream_max_lines = 500
+icons = true          # needs a Nerd Font
 ```
 
-On macOS the same `~/.config/saturn/` directory is used (`$XDG_CONFIG_HOME` is honoured).
-An invalid value for any key (such as `icons = "yes"`) makes saturn ignore the whole
-config file and use the defaults; the log says why.
+An invalid value makes saturn ignore the file; the log says why.
 
 ## Themes
 
-`theme` names a built-in theme, a file in `~/.config/saturn/themes/<name>.toml`, a
-path to a `.toml` file, or (syntax colors only) one of syntect's bundled themes.
-`saturn theme list` prints everything the config accepts. In saturn, `Ctrl+P` →
-“Select theme…” opens a picker with live preview: the theme follows the cursor,
-`Enter` keeps it and writes `theme = "<name>"` to `config.toml` so the next launch
-starts with it (other keys and comments in the file are left as they are), `Esc`
-reverts to the previous one.
-
-Highlighting uses the two-face syntax set, which holds the syntaxes of the `bat` tool.
-
-Built in: `tokyo-night`, `tokyo-night-storm`, `monokai`, `catppuccin-mocha`, `dracula`,
-`gruvbox-dark`, `nord`, `one-dark`, `solarized-dark`, `solarized-light`, `github-dark`
-and `terminal` (your terminal's 16 colors, no background painted).
-
-### Adopting your Neovim colorscheme
+`saturn theme list` shows what's available; `Ctrl+P` → "Select theme…" previews them live.
+Built in: `tokyo-night`, `tokyo-night-storm`, `catppuccin-mocha`, `dracula`, `gruvbox-dark`,
+`monokai`, `nord`, `one-dark`, `github-dark`, `solarized-dark`, `solarized-light`, `terminal`.
 
 ```bash
-saturn theme import-nvim                      # the colorscheme your init.lua sets
-saturn theme import-nvim --colorscheme nord   # any installed one; --name picks the file name
+saturn theme import-nvim        # copy your Neovim colorscheme
 ```
 
-This runs `nvim --headless` with your own config, reads the resolved highlight
-groups (treesitter captures such as `@keyword.import` first, legacy groups like
-`Keyword` as fallback) and writes `~/.config/saturn/themes/<colorscheme>.toml`.
-Pick it from the theme picker or put `theme = "<colorscheme>"` in the config to use it. The file is a normal theme
-file, so tweak it freely; re-run with `--force` to regenerate.
-
-### Writing a theme
-
-A theme file has three optional tables. `extends = "name"` inherits every key of
-another theme first (built-in or user), so a tweak can be a few lines:
-
-```toml
-name = "My Tokyo"
-extends = "tokyo-night"
-
-[ui]
-background = "none"            # keep the terminal's background
-focus = "#ff9e64"
-
-[syntax]
-comment = { fg = "#565f89", italic = true }
-"keyword.import" = "#7dcfff"   # keys with dots must be quoted
-
-[scopes]                       # raw syntect scope selectors, for anything else
-"meta.function-call.arguments" = "#c0caf5"
-```
-
-Colors are `#rrggbb`, `#rgb`, an ANSI name (`red`, `light blue`, `dark gray`),
-a 0–255 index, or `none` (terminal default). A style is either a color or a table
-with `fg`, `bg`, `bold`, `italic`, `underline`.
-
-`[ui]` keys: `background`, `foreground`, `muted` (hints, raw cells), `line_numbers`,
-`selection`, `cursor_line`, `input_bg` (full-row tint behind code inputs, so they
-stand out from outputs), `focus` (bar on the focused cell, borders), `edit` (bar
-while editing), `error`, `warning`, `info`, `success`, `status_bg`, `status_fg`,
-`border`, `float_bg`, `match_bg`, `match_fg` (picker selection), `search_bg`,
-`search_fg`, `search_current_bg` (search matches, and the one the cursor is on), `mode_fg`,
-`mode_command`, `mode_normal`, `mode_insert`, `mode_visual`, `mode_search`. Unset
-keys fall back to sensible relatives (`border` → `focus`, `mode_insert` → `edit`,
-`input_bg` → a shade of `background`, …). With no `background` (and no `input_bg`)
-there is no tint, and unfocused cells show a dim bar instead.
-
-`[syntax]` keys (named like treesitter captures): `comment`, `comment.doc`, `keyword`,
-`keyword.control`, `keyword.import`, `keyword.return`, `keyword.exception`,
-`keyword.function`, `keyword.operator`, `operator`, `string`, `string.escape`,
-`string.regexp`, `number`, `boolean`, `constant`, `constant.builtin`, `variable`,
-`variable.builtin`, `parameter`, `property`, `function`, `function.call`,
-`function.builtin`, `method`, `constructor`, `type`, `type.builtin`, `module`,
-`decorator`, `punctuation`, `punctuation.bracket`, `punctuation.special`, `tag`,
-`attribute`, `markup.heading`, `markup.strong`, `markup.emphasis`, `markup.raw`,
-`markup.link`, `markup.list`, `markup.quote`, `invalid`. More specific keys win
-over broader ones (`keyword.import` over `keyword`); unset keys inherit the
-foreground. `saturn theme show NAME` prints the resolved colors and the syntect
-selectors each key maps to.
-
-While a cell is being edited, the editor shows the theme's colors but not its
-bold/italic attributes (a limitation of the editor widget); unfocused cells show both.
-Rendered markdown cells keep their own fixed styling.
+Custom themes live in `~/.config/saturn/themes/<name>.toml` and can `extends = "tokyo-night"`;
+see `assets/themes/` for the keys, and `saturn theme show NAME` for resolved colours.
 
 ## Development
 
 ```bash
-cargo build
 cargo test
 cargo run -- assets/sample.ipynb
 ```
-
-`assets/make_sample.py` regenerates the sample notebook (needs matplotlib, plotly, pandas).
