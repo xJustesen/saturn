@@ -30,14 +30,14 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
     let hl = search.active();
     let cx = area.x + GUTTER_W + BAR_W;
     let cw = cell::content_width(area.width);
-    for i in first..n {
+    for (i, c) in nb.cells.iter_mut().enumerate().skip(first) {
         let Some(l) = layout.layout(i) else { break };
         if top >= area.height as i64 {
             break;
         }
         let h = l.total as i64;
         if top + h > 0 {
-            let cur = cell::render(&mut nb.cells[i], l, i == focused, editing && i == focused, area, top as i32, &mut ctx, buf);
+            let cur = cell::render(c, l, i == focused, editing && i == focused, area, top as i32, &mut ctx, buf);
             if cur.is_some() {
                 *edit_cursor = cur;
             }
