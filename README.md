@@ -17,7 +17,6 @@
 </h4>
 
 <div align="center"><p>
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.0-C9CBFF?style=for-the-badge&labelColor=302D41" />
   <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-ee999f?style=for-the-badge&labelColor=302D41&logo=rust&logoColor=D9E0EE" />
   <img alt="Jupyter" src="https://img.shields.io/badge/kernels-Jupyter-8bd5ca?style=for-the-badge&labelColor=302D41&logo=jupyter&logoColor=D9E0EE" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-c69ff5?style=for-the-badge&labelColor=302D41" />
