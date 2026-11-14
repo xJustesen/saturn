@@ -47,3 +47,34 @@ jobs:
         with:
           fetch-depth: 0
       - run: scripts/check_version_bump.sh "origin/${{ github.base_ref }}"
+
+  # After a merge to main, tag the commit `v<version>` and publish a GitHub
+  # release for it, unless that version is already tagged (a docs- or CI-only
+  # merge does not bump the version).
+  release:
+    name: Release tag
+    if: github.event_name == 'push'
+    needs: [test, clippy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the crate version
+        id: version
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists; nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: softprops/action-gh-release@v3
+        if: steps.version.outputs.exists == 'false'
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
