@@ -277,10 +277,10 @@ pub fn render(
             }
             let y = area.y + y as u16;
             for x in area.x..area.x + area.width {
-                if let Some(c) = buf.cell_mut((x, y)) {
-                    if c.bg == Color::Reset || c.bg == plain {
-                        c.set_bg(bg);
-                    }
+                if let Some(c) = buf.cell_mut((x, y))
+                    && (c.bg == Color::Reset || c.bg == plain)
+                {
+                    c.set_bg(bg);
                 }
             }
         }
