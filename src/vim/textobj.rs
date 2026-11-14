@@ -104,7 +104,7 @@ fn quote(t: &Text, cur: Pos, q: char, around: bool) -> Option<Region> {
         }
         i += 1;
     }
-    let pairs: Vec<(usize, usize)> = marks.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+    let pairs: Vec<(usize, usize)> = marks.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect();
     let (a, b) = pairs
         .iter()
         .find(|(a, b)| *a <= cur.col && cur.col <= *b)
