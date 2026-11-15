@@ -16,11 +16,6 @@
   <a href="#-themes">Themes</a>
 </h4>
 
-<div align="center"><p>
-  <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-ee999f?style=for-the-badge&labelColor=302D41&logo=rust&logoColor=D9E0EE" />
-  <img alt="Jupyter" src="https://img.shields.io/badge/kernels-Jupyter-8bd5ca?style=for-the-badge&labelColor=302D41&logo=jupyter&logoColor=D9E0EE" />
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-c69ff5?style=for-the-badge&labelColor=302D41" />
-</p></div>
 
 saturn edits and runs `.ipynb` files straight from your terminal. It talks to Jupyter kernels
 directly over ZeroMQ, so there is no Jupyter server to start and no browser to open: Vim
