@@ -26,6 +26,13 @@ pub fn content_width(width: u16) -> u16 {
     width.saturating_sub(GUTTER_W + BAR_W + RIGHT_PAD).max(1)
 }
 
+/// What the inline prompt shows beside the cell: the model it asks and the
+/// spinner's phase.
+pub struct PromptInfo<'a> {
+    pub model: &'a str,
+    pub spinner: usize,
+}
+
 pub struct CellCtx<'a> {
     pub cfg: &'a Config,
     pub theme: &'a Theme,
@@ -34,6 +41,7 @@ pub struct CellCtx<'a> {
     pub plotly: &'a mut PlotlySidecar,
     pub lang_ext: &'a str,
     pub line_numbers: bool,
+    pub prompt: PromptInfo<'a>,
 }
 
 fn digits(n: usize) -> usize {
@@ -71,6 +79,8 @@ pub fn measure(cell: &mut Cell, editing: bool, width: u16, ctx: &mut CellCtx) ->
             CellKind::Code | CellKind::Raw => text_rows(&expand_tabs(&cell.source, tab), cw as usize, tab, wrap) as u16,
         },
     };
+    // The inline prompt sits under the source and counts as part of it.
+    let source_rows = source_rows + if cell.prompt.is_some() { crate::ui::inline_prompt::ROWS } else { 0 };
     let mut outputs = Vec::new();
     let mut collapsed_rows = 0;
     if cell.kind == CellKind::Code && !cell.outputs.is_empty() {
@@ -301,6 +311,17 @@ pub fn render(
                     continue;
                 }
                 buf.set_line(cx, area.y + dy as u16, line, cw);
+            }
+        }
+    }
+
+    if let Some(p) = &cell.prompt {
+        let y = top + src_rows - crate::ui::inline_prompt::ROWS as i32;
+        // Drawn only when both rows are on screen: a clipped prompt cannot take input.
+        if y >= 0 && y + crate::ui::inline_prompt::ROWS as i32 <= height {
+            let rect = Rect::new(bar_x, area.y + y as u16, area.width.saturating_sub(GUTTER_W), crate::ui::inline_prompt::ROWS);
+            if let Some(pos) = crate::ui::inline_prompt::render(buf, rect, p, ctx.prompt.model, ctx.prompt.spinner, theme) {
+                cursor = Some(pos);
             }
         }
     }

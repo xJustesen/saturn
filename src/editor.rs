@@ -91,6 +91,21 @@ impl CellEditor {
         self.vim.text()
     }
 
+    /// The text of the visual selection, if there is one.
+    pub fn selected_text(&self) -> Option<String> {
+        let v = &self.vim;
+        let region = v.selection()?;
+        let rows: Vec<String> = v
+            .spans(&region)
+            .into_iter()
+            .filter_map(|(row, start, end)| {
+                let line = v.text.get(row)?;
+                Some(line[start.min(line.len())..end.min(line.len())].iter().collect())
+            })
+            .collect();
+        Some(rows.join("\n"))
+    }
+
     pub fn key(&mut self, key: KeyEvent) {
         if let Some(k) = K::from_event(&key) {
             self.vim.key(k);

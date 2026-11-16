@@ -9,6 +9,7 @@ pub mod dashboard_logo;
 pub mod file_picker;
 pub mod fuzzy;
 pub mod icons;
+pub mod inline_prompt;
 pub mod layout;
 pub mod notebook_view;
 pub mod overlay;

@@ -242,6 +242,14 @@ to execute code and see the results. Edits, new cells and deletions are shown to
 that they accept or reject, so make the change with the tool rather than pasting the code into the chat, and say in \
 a sentence what you proposed. Cells are numbered from 1; the numbers shift when cells are added or removed.";
 
+/// What the lean process behind the inline prompt is told.
+pub const INLINE_PROMPT: &str = "\
+You are the inline editor of saturn, a terminal Jupyter notebook. Each message shows one notebook cell in a \
+<saturn-context> block, followed by an instruction for that cell. Carry the instruction out by calling propose_edit \
+with the cell's number and the complete new source; the user reviews it as a diff. Keep what the instruction does not \
+ask to change, and match the style of the code or prose that is there. Do not explain an edit. If the instruction is a \
+question, or cannot be carried out by editing this cell, answer in one short plain sentence instead.";
+
 #[cfg(test)]
 mod tests {
     use super::*;

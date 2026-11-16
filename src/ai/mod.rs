@@ -118,6 +118,11 @@ pub struct AiConfig {
     pub use_api_key: bool,
     /// The tools of the in-band MCP server.
     pub tools: Vec<ToolSpec>,
+    /// A lean process for quick, single-purpose requests: `system_prompt`
+    /// replaces the CLI's own instead of adding to it, and none of the
+    /// CLI's built-in tools, skills or commands are offered. It starts
+    /// faster and carries a fraction of the context.
+    pub minimal: bool,
 }
 
 impl AiConfig {
@@ -134,6 +139,7 @@ impl AiConfig {
             user_mcp: false,
             use_api_key: false,
             tools: Vec::new(),
+            minimal: false,
         }
     }
 }

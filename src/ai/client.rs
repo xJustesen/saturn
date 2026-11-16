@@ -85,7 +85,11 @@ fn cli_args(config: &AiConfig, session_id: &str) -> Vec<String> {
         flag("--effort", effort);
     }
     if let Some(prompt) = &config.system_prompt {
-        flag("--append-system-prompt", prompt);
+        flag(if config.minimal { "--system-prompt" } else { "--append-system-prompt" }, prompt);
+    }
+    if config.minimal {
+        // `--tools` names the built-in set only; saturn's own tools stay.
+        flag("--tools", "");
     }
     if !config.allowed_tools.is_empty() {
         flag("--allowedTools", &config.allowed_tools.join(","));
@@ -95,6 +99,9 @@ fn cli_args(config: &AiConfig, session_id: &str) -> Vec<String> {
     }
     if !config.user_mcp {
         args.push("--strict-mcp-config".to_string());
+    }
+    if config.minimal {
+        args.push("--disable-slash-commands".to_string());
     }
     args
 }

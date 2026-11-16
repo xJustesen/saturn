@@ -6,7 +6,7 @@ use ratatui::style::Style;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
 use crate::app::{App, Mode};
-use crate::ui::cell::{self, CellCtx, BAR_W, GUTTER_W};
+use crate::ui::cell::{self, CellCtx, PromptInfo, BAR_W, GUTTER_W};
 
 pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
     if area.width < 12 || area.height == 0 {
@@ -25,8 +25,9 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) {
     let total_rows = app.layout.total_rows();
     let scroll_row = app.scroll_row;
     let focused = app.focused;
+    let prompt = PromptInfo { model: &app.quick_label, spinner: app.spinner };
     let App { nb, layout, cache, images, plotly, cfg, theme, lang_ext, line_numbers, search, edit_cursor, .. } = app;
-    let mut ctx = CellCtx { cfg, theme, cache, images, plotly, lang_ext, line_numbers: *line_numbers };
+    let mut ctx = CellCtx { cfg, theme, cache, images, plotly, lang_ext, line_numbers: *line_numbers, prompt };
     let hl = search.active();
     let cx = area.x + GUTTER_W + BAR_W;
     let cw = cell::content_width(area.width);
