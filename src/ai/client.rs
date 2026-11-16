@@ -38,6 +38,9 @@ fn program(config: &AiConfig) -> OsString {
 fn command(config: &AiConfig) -> Command {
     let mut cmd = Command::new(program(config));
     cmd.current_dir(&config.cwd).kill_on_drop(true);
+    // Saturn's few tools are loaded up front: looking each one up through
+    // the CLI's tool search costs a model round trip on first use.
+    cmd.env("ENABLE_TOOL_SEARCH", "false");
     if !config.use_api_key {
         // An API key in the environment always wins in `-p` mode; without
         // these the CLI uses the subscription login.

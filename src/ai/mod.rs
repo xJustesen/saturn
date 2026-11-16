@@ -13,6 +13,7 @@
 pub mod client;
 pub mod context;
 pub mod proto;
+pub mod tools;
 
 use std::path::PathBuf;
 

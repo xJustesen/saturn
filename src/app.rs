@@ -25,11 +25,11 @@ use crate::vim::Request;
 use crate::files::projects::Project;
 use crate::files::{FileEntry, PickerPrefs};
 use crate::files::preview::{PreviewWorker, UiColors};
-use crate::ai::{AiCommand, AiConfig, AiEvent, AiHandle, Permission, TurnOutcome, context};
+use crate::ai::{AiCommand, AiConfig, AiEvent, AiHandle, Image, Permission, ToolContent, TurnOutcome, context, tools};
 use crate::kernel::{KernelCommand, KernelEvent, KernelHandle, KernelStatus, ReplyStatus, startup};
 use crate::keymap::{self, Key, KeyAction};
 use crate::notebook::undo::CellOp;
-use crate::notebook::{Cell, CellKind, ExecState, Notebook, Output, io as nbio};
+use crate::notebook::{Cell, CellId, CellKind, ExecState, Notebook, Output, io as nbio};
 use crate::render::RenderCache;
 use crate::render::image::ImageStore;
 use crate::render::plotly::PlotlySidecar;
@@ -40,7 +40,7 @@ use crate::ui::cell::content_width;
 use crate::ui::cell_picker::{CellPickerState, PickerAction};
 use crate::ui::chat::{Answer, Ask, ChatAction, ChatState};
 use crate::ui::dashboard::{DashAction, DashItem, DashboardState};
-use crate::ui::diff::Proposal;
+use crate::ui::diff::{Kind as ProposalKind, Proposal};
 use crate::ui::layout::LayoutCache;
 use crate::ui::file_picker::{FileAction, FilePickerState, PickerCtx, ThreadIo};
 use crate::ui::overlay::{
@@ -87,6 +87,14 @@ const PIXEL_MOUSE_OFF: &str = "\x1b[?1016l";
 pub enum Mode {
     Command,
     Edit,
+}
+
+/// A tool call of the assistant that is answered later.
+enum ToolWait {
+    /// When the user settles this proposal.
+    Proposal { tool: String, proposal: u64 },
+    /// When these cells have run.
+    Run { tool: String, cells: Vec<CellId> },
 }
 
 /// Which pane of the notebook screen has the keys.
@@ -141,6 +149,10 @@ pub struct App {
     pub focus: Focus,
     /// Id of the last proposed edit.
     next_proposal: u64,
+    /// The assistant's tool calls that wait on the user or the kernel.
+    ai_waits: Vec<ToolWait>,
+    /// The keys go back to the panel once the proposals it made are settled.
+    return_to_chat: bool,
     pub search: SearchState,
     pub lang_ext: String,
     pub line_numbers: bool,
@@ -213,6 +225,8 @@ impl App {
             chat_open: false,
             focus: Focus::Notebook,
             next_proposal: 0,
+            ai_waits: Vec::new(),
+            return_to_chat: false,
             search: SearchState::default(),
             lang_ext: "py".to_string(),
             view: Rect::default(),
@@ -370,6 +384,8 @@ impl App {
             AiEvent::TextDelta(text) => chat.push_delta(&text),
             // What a subagent does stays inside its own tool row.
             AiEvent::ToolStart { parent: Some(_), .. } => {}
+            // Looking up a tool's schema is plumbing, not something the model does for the user.
+            AiEvent::ToolStart { name, .. } if name == "ToolSearch" => {}
             AiEvent::ToolStart { id, name, input, .. } => {
                 let detail = tool_detail(&input, 60);
                 let name = name.strip_prefix("mcp__saturn__").unwrap_or(&name).to_string();
@@ -390,17 +406,17 @@ impl App {
                     self.flash("claude asks for permission (Ctrl+L)");
                 }
             }
-            // Saturn offers the model no tools of its own yet.
-            AiEvent::ToolCall { id, name, .. } => {
-                if let Some(ai) = &self.ai {
-                    let content = vec![crate::ai::ToolContent::Text(format!("saturn has no tool named {name}"))];
-                    ai.send(AiCommand::ToolReply { id, content, is_error: true });
-                }
-            }
+            AiEvent::ToolCall { id, name, arguments, .. } => match self.run_tool(&id, &name, &arguments) {
+                Ok(Some((text, images))) => self.tool_reply(id, text, images, false),
+                // Answered when the user or the kernel is done.
+                Ok(None) => {}
+                Err(e) => self.tool_reply(id, e, Vec::new(), true),
+            },
             AiEvent::RequestCancelled { id } => {
                 if chat.ask.as_ref().is_some_and(|a| a.id == id) {
                     chat.ask = None;
                 }
+                self.cancel_wait(&id);
             }
             AiEvent::TurnDone { outcome, usage, .. } => {
                 chat.busy = false;
@@ -452,6 +468,7 @@ impl App {
             },
             AppEvent::Terminal(Event::Key(key)) => {
                 self.on_key(key);
+                self.sweep_proposals();
                 self.refresh_chat_chips();
                 self.dirty_ui = true;
             }
@@ -481,6 +498,7 @@ impl App {
             AppEvent::Terminal(_) => {}
             AppEvent::Kernel(ev) => {
                 self.on_kernel(ev);
+                self.check_runs();
                 self.dirty_ui = true;
             }
             AppEvent::Ai(ev) => {
@@ -757,6 +775,8 @@ impl App {
             let mut cfg = AiConfig::new(crate::files::root::find_root(&dir).root);
             cfg.system_prompt = Some(context::SYSTEM_PROMPT.to_string());
             cfg.disallowed_tools = vec!["NotebookEdit".to_string()];
+            cfg.tools = tools::specs();
+            cfg.allowed_tools = tools::allowed();
             self.ai = Some(AiHandle::spawn(cfg, self.tx.clone()));
         }
         self.ai.as_ref().expect("just started")
@@ -854,48 +874,277 @@ impl App {
     /// Show `after` as a proposed edit on cell `idx`, as a diff the user
     /// accepts or rejects. Returns the proposal's id.
     pub fn propose_edit(&mut self, idx: usize, after: String) -> Option<u64> {
+        (idx < self.nb.cells.len()).then(|| self.propose(idx, ProposalKind::Edit, after, None))
+    }
+
+    /// Put a proposal on cell `idx`. One made by a tool call (`tool`) is
+    /// answered when the user settles it, and takes the user to the cell.
+    fn propose(&mut self, idx: usize, kind: ProposalKind, after: String, tool: Option<&str>) -> u64 {
+        let typing = self.mode == Mode::Edit && self.focus == Focus::Notebook;
         if self.mode == Mode::Edit && idx == self.focused {
             self.leave_edit();
         }
-        let cell = self.nb.cells.get_mut(idx)?;
         self.next_proposal += 1;
-        cell.proposal = Some(Proposal::new(self.next_proposal, &cell.source, after));
+        let id = self.next_proposal;
+        if let Some(old) = self.nb.cells[idx].proposal.take() {
+            self.answer_proposal(old.id, "A newer proposal for the same cell replaced this one.");
+        }
+        let cell = &mut self.nb.cells[idx];
+        cell.proposal = Some(Proposal::of(id, kind, &cell.source, after));
         self.layout.invalidate_cell(idx);
-        Some(self.next_proposal)
+        if let Some(tool) = tool {
+            self.ai_waits.push(ToolWait::Proposal { tool: tool.to_string(), proposal: id });
+            // Someone typing in another cell is left alone; the status bar
+            // counts the proposal.
+            if !typing || idx == self.focused {
+                if self.mode == Mode::Edit {
+                    self.leave_edit();
+                }
+                self.set_focus(idx);
+                self.scroll_to_focused();
+                if self.focus == Focus::Chat {
+                    self.focus = Focus::Notebook;
+                    self.return_to_chat = true;
+                }
+            }
+        }
+        id
     }
 
-    /// Accept or reject the proposal on the focused cell. Returns its id.
-    fn settle_proposal(&mut self, accept: bool) -> Option<u64> {
-        let idx = self.focused;
-        let p = self.nb.cells.get_mut(idx)?.proposal.take()?;
-        if accept {
-            let before = self.nb.cells[idx].clone();
-            let mut after = before.clone();
-            after.set_source(p.after);
-            self.nb.apply(CellOp::Replace { idx, before, after });
-            self.cache.invalidate_cell(&self.nb.cells[idx].id.clone());
+    fn delete_cell_at(&mut self, idx: usize) {
+        let Some(cell) = self.nb.cells.get(idx) else { return };
+        let snapshot = cell.clone();
+        self.cache.invalidate_cell(&snapshot.id);
+        self.nb.apply(CellOp::Delete { idx, cell: snapshot });
+        self.layout.removed(idx);
+        if self.nb.cells.len() == 1 && self.layout.layout(0).is_none() {
+            self.layout.inserted(0);
         }
+        self.set_focus(idx);
+        self.layout.invalidate_all();
+    }
+
+    /// Accept or reject the proposal on the focused cell; `editing` says the
+    /// user goes on to edit the cell. False when the cell has none.
+    fn settle_proposal(&mut self, accept: bool, editing: bool) -> bool {
+        let idx = self.focused;
+        let Some(p) = self.nb.cells.get_mut(idx).and_then(|c| c.proposal.take()) else { return false };
+        let answer = match (p.kind, accept) {
+            (ProposalKind::Edit | ProposalKind::Insert, true) => {
+                let before = self.nb.cells[idx].clone();
+                let mut after = before.clone();
+                after.set_source(p.after);
+                self.nb.apply(CellOp::Replace { idx, before, after });
+                self.cache.invalidate_cell(&self.nb.cells[idx].id.clone());
+                let what = if p.kind == ProposalKind::Edit {
+                    "The user accepted the edit.".to_string()
+                } else {
+                    format!("The user kept the new cell. It is cell {}.", idx + 1)
+                };
+                if editing {
+                    format!("{what} They opened the cell to edit it further, so read it again before relying on its content.")
+                } else {
+                    what
+                }
+            }
+            (ProposalKind::Edit, false) => {
+                "The user rejected the edit; the cell is unchanged. Ask what they want instead of proposing it again.".to_string()
+            }
+            (ProposalKind::Insert, false) => {
+                self.delete_cell_at(idx);
+                "The user discarded the new cell.".to_string()
+            }
+            (ProposalKind::Delete, true) => {
+                self.delete_cell_at(idx);
+                "The user deleted the cell. The cells after it moved up by one.".to_string()
+            }
+            (ProposalKind::Delete, false) => "The user kept the cell.".to_string(),
+        };
         self.layout.invalidate_cell(idx);
         self.scroll_to_focused();
-        Some(p.id)
+        self.answer_proposal(p.id, &answer);
+        true
+    }
+
+    /// Answer the tool call that made proposal `id`, if one did. With the
+    /// last of them settled, the keys go back to the panel they came from.
+    fn answer_proposal(&mut self, id: u64, answer: &str) {
+        let Some(i) = self.ai_waits.iter().position(|w| matches!(w, ToolWait::Proposal { proposal, .. } if *proposal == id)) else {
+            return;
+        };
+        if let ToolWait::Proposal { tool, .. } = self.ai_waits.remove(i) {
+            self.tool_reply(tool, answer.to_string(), Vec::new(), false);
+        }
+        let open = self.ai_waits.iter().any(|w| matches!(w, ToolWait::Proposal { .. }));
+        if !open && std::mem::take(&mut self.return_to_chat) && self.chat_open {
+            self.focus = Focus::Chat;
+        }
+    }
+
+    /// Answer proposals that went away without the user settling them (their
+    /// cell was deleted, or replaced by an undo).
+    fn sweep_proposals(&mut self) {
+        let live: Vec<u64> = self.nb.cells.iter().filter_map(|c| c.proposal.as_ref().map(|p| p.id)).collect();
+        let gone: Vec<u64> = self
+            .ai_waits
+            .iter()
+            .filter_map(|w| match w {
+                ToolWait::Proposal { proposal, .. } if !live.contains(proposal) => Some(*proposal),
+                _ => None,
+            })
+            .collect();
+        for id in gone {
+            self.answer_proposal(id, "The proposal went away without an answer: its cell was changed or removed.");
+        }
     }
 
     /// Keys of a cell that shows a proposal: Tab accepts, `X` rejects and
     /// Enter accepts and opens the cell for editing.
     fn on_proposal_key(&mut self, key: &KeyEvent) -> bool {
-        if self.nb.cells.get(self.focused).is_none_or(|c| c.proposal.is_none()) {
+        let Some(kind) = self.nb.cells.get(self.focused).and_then(|c| c.proposal.as_ref()).map(|p| p.kind) else {
             return false;
-        }
+        };
         match key.code {
             KeyCode::Tab => self.dispatch(Command::AcceptProposal),
             KeyCode::Char('X') => self.dispatch(Command::RejectProposal),
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                self.dispatch(Command::AcceptProposal);
+            KeyCode::Enter if key.modifiers.is_empty() && kind != ProposalKind::Delete => {
+                self.settle_proposal(true, true);
                 self.enter_edit(false);
             }
             _ => return false,
         }
         true
+    }
+
+    // ----- the assistant's tools -------------------------------------------------
+
+    fn tool_reply(&self, id: String, text: String, images: Vec<Image>, is_error: bool) {
+        let Some(ai) = &self.ai else { return };
+        let mut content = vec![ToolContent::Text(text)];
+        content.extend(images.into_iter().map(ToolContent::Image));
+        ai.send(AiCommand::ToolReply { id, content, is_error });
+    }
+
+    /// The cells at `indices` as the model reads them.
+    fn cells_for_model(&self, indices: &[usize]) -> (String, Vec<Image>) {
+        let plotly = &self.plotly;
+        let png =
+            |fig: &serde_json::Value| plotly.cached(crate::render::hash_bytes(fig.to_string().as_bytes())).map(|p| p.to_vec());
+        let cells: Vec<(usize, &Cell)> = indices.iter().filter_map(|&i| self.nb.cells.get(i).map(|c| (i + 1, c))).collect();
+        context::cells_context(&cells, &png)
+    }
+
+    /// Run one of saturn's tools for the assistant. `Ok(None)` means the
+    /// answer follows later (the user reviews a proposal, the kernel runs).
+    fn run_tool(&mut self, id: &str, name: &str, args: &serde_json::Value) -> Result<Option<(String, Vec<Image>)>, String> {
+        if !matches!(self.screen, Screen::Notebook) {
+            return Err("no notebook is open".to_string());
+        }
+        let n = self.nb.cells.len();
+        match name {
+            tools::OUTLINE => Ok(Some((tools::outline(&self.nb, self.focused), Vec::new()))),
+            tools::READ => Ok(Some(self.cells_for_model(&tools::cell_indices(args, n)?))),
+            tools::EDIT => {
+                let idx = tools::cell_index(args, "cell", n)?;
+                let current = self.nb.cells[idx].text();
+                let mut source = tools::text_arg(args, "source")?;
+                // Models end a source with a newline; cells do not.
+                if !current.ends_with('\n') {
+                    source = source.trim_end_matches('\n');
+                }
+                let source = source.to_string();
+                if current == source {
+                    return Err("the cell already has exactly this source".to_string());
+                }
+                self.propose(idx, ProposalKind::Edit, source, Some(id));
+                Ok(None)
+            }
+            tools::INSERT => {
+                let after = args.get("after").and_then(|v| v.as_u64()).ok_or("`after` must be a cell number, or 0")? as usize;
+                if after > n {
+                    return Err(format!("there is no cell {after}: the notebook has cells 1 to {n}"));
+                }
+                let kind = match tools::text_arg(args, "kind")? {
+                    "code" => CellKind::Code,
+                    "markdown" => CellKind::Markdown,
+                    other => return Err(format!("`kind` must be code or markdown, not {other}")),
+                };
+                let source = tools::text_arg(args, "source")?.trim_end_matches('\n').to_string();
+                if self.mode == Mode::Edit {
+                    self.leave_edit();
+                }
+                self.nb.apply(CellOp::Insert { idx: after, cell: Cell::new(kind, "") });
+                self.layout.inserted(after);
+                self.layout.invalidate_all();
+                self.propose(after, ProposalKind::Insert, source, Some(id));
+                Ok(None)
+            }
+            tools::DELETE => {
+                let idx = tools::cell_index(args, "cell", n)?;
+                self.propose(idx, ProposalKind::Delete, String::new(), Some(id));
+                Ok(None)
+            }
+            tools::RUN => {
+                let indices = tools::cell_indices(args, n)?;
+                if let Some(&i) = indices.iter().find(|&&i| self.nb.cells[i].kind != CellKind::Code) {
+                    return Err(format!("cell {} is not a code cell", i + 1));
+                }
+                match &self.kernel {
+                    None => return Err("no kernel is running; the user selects one with K".to_string()),
+                    Some(k) if k.status == KernelStatus::Dead => {
+                        return Err("the kernel is dead; the user restarts it with 00".to_string());
+                    }
+                    Some(_) => {}
+                }
+                let cells = indices.iter().map(|&i| self.nb.cells[i].id.clone()).collect();
+                self.run_cells(&indices, true);
+                self.ai_waits.push(ToolWait::Run { tool: id.to_string(), cells });
+                self.check_runs();
+                Ok(None)
+            }
+            _ => Err(format!("saturn has no tool named {name}")),
+        }
+    }
+
+    /// Answer the `run_cells` calls whose cells have all finished.
+    fn check_runs(&mut self) {
+        let running = |nb: &Notebook, id: &CellId| {
+            nb.index_of(id).is_some_and(|i| matches!(nb.cells[i].exec, ExecState::Queued | ExecState::Running))
+        };
+        let mut i = 0;
+        while i < self.ai_waits.len() {
+            let done = match &self.ai_waits[i] {
+                ToolWait::Run { cells, .. } => !cells.iter().any(|id| running(&self.nb, id)),
+                ToolWait::Proposal { .. } => false,
+            };
+            if !done {
+                i += 1;
+                continue;
+            }
+            if let ToolWait::Run { tool, cells } = self.ai_waits.remove(i) {
+                let indices: Vec<usize> = cells.iter().filter_map(|id| self.nb.index_of(id)).collect();
+                let (text, images) = self.cells_for_model(&indices);
+                self.tool_reply(tool, text, images, false);
+            }
+        }
+    }
+
+    /// The assistant withdrew tool call `tool`: its proposal goes away too.
+    fn cancel_wait(&mut self, tool: &str) {
+        let Some(i) = self.ai_waits.iter().position(|w| match w {
+            ToolWait::Proposal { tool: t, .. } | ToolWait::Run { tool: t, .. } => t == tool,
+        }) else {
+            return;
+        };
+        if let ToolWait::Proposal { proposal, .. } = self.ai_waits.remove(i)
+            && let Some(idx) = self.nb.cells.iter().position(|c| c.proposal.as_ref().is_some_and(|p| p.id == proposal))
+        {
+            let kind = self.nb.cells[idx].proposal.take().map(|p| p.kind);
+            self.layout.invalidate_cell(idx);
+            if kind == Some(ProposalKind::Insert) {
+                self.delete_cell_at(idx);
+            }
+        }
     }
 
     fn on_edit_key(&mut self, key: KeyEvent) {
@@ -1356,12 +1605,12 @@ impl App {
                 }
             }
             Command::AcceptProposal => {
-                if self.settle_proposal(true).is_none() {
+                if !self.settle_proposal(true, false) {
                     self.flash("no proposed edit on this cell");
                 }
             }
             Command::RejectProposal => {
-                if self.settle_proposal(false).is_none() {
+                if !self.settle_proposal(false, false) {
                     self.flash("no proposed edit on this cell");
                 }
             }
@@ -2530,6 +2779,16 @@ fn tokens(n: u64) -> String {
 fn tool_detail(input: &serde_json::Value, max: usize) -> String {
     const KEYS: [&str; 9] = ["command", "file_path", "pattern", "path", "url", "query", "description", "prompt", "skill"];
     let text = KEYS.iter().find_map(|k| input.get(*k).and_then(|v| v.as_str())).unwrap_or("");
+    // Saturn's own tools name their cells by number.
+    let cells = match (input.get("cell"), input.get("cells")) {
+        _ if input.get("after").is_some_and(|n| n.is_u64()) => format!("after cell {}", input["after"]),
+        (Some(n), _) if n.is_u64() => format!("cell {n}"),
+        (_, Some(serde_json::Value::Array(list))) => {
+            format!("cell {}", list.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))
+        }
+        _ => String::new(),
+    };
+    let text = if text.is_empty() { cells.as_str() } else { text };
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     ui::text::cut(&one_line, max)
 }

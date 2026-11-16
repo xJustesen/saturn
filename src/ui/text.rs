@@ -111,6 +111,14 @@ pub fn wrap_words(line: &Line<'static>, max_width: usize) -> Vec<Line<'static>> 
     let mut has_word = false;
     for (c, st) in cells {
         if w + width(c) > max_width && has_word {
+            // A space that does not fit ends the row where it stands.
+            if c == ' ' {
+                rows.push(std::mem::replace(&mut row, indent.clone()));
+                w = indent.len();
+                last_space = None;
+                has_word = false;
+                continue;
+            }
             let rest = match last_space {
                 Some(i) => {
                     let rest = row.split_off(i + 1);
@@ -124,9 +132,6 @@ pub fn wrap_words(line: &Line<'static>, max_width: usize) -> Vec<Line<'static>> 
             row.extend(rest);
             w = row.iter().map(|(c, _)| width(*c)).sum();
             last_space = None;
-            if c == ' ' {
-                continue;
-            }
         }
         if c == ' ' {
             if has_word {
@@ -375,6 +380,19 @@ pub fn cut_left(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_words_breaks_at_spaces_and_keeps_every_word_apart() {
+        let rows = |s: &str, w: usize| -> Vec<String> {
+            wrap_words(&Line::from(s.to_string()), w).iter().map(|l| l.to_string()).collect()
+        };
+        assert_eq!(rows("have numpy (and likely pandas) installed", 16), ["have numpy (and", "likely pandas)", "installed"]);
+        // The space that overflows a full row ends it; nothing is glued.
+        assert_eq!(rows("abcd efgh ijkl", 9), ["abcd efgh", "ijkl"]);
+        assert_eq!(rows("  - a long list item here", 12), ["  - a long", "  list item", "  here"]);
+        assert_eq!(rows("supercalifragilistic", 8), ["supercal", "ifragili", "stic"]);
+        assert_eq!(rows("short", 8), ["short"]);
+    }
 
     #[test]
     fn clean_text_removes_escape_sequences() {

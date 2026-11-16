@@ -37,6 +37,13 @@ pub fn diff_lines(old: &str, new: &str) -> Vec<DiffLine> {
         tag,
         text: text.to_string(),
     };
+    // Nothing to align against: a new or an emptied source is one run.
+    if old.is_empty() {
+        return b.iter().map(|t| line(Tag::Add, t)).collect();
+    }
+    if new.is_empty() {
+        return a.iter().map(|t| line(Tag::Del, t)).collect();
+    }
     if a.len().saturating_mul(b.len()) > MAX_PAIRS {
         return a
             .iter()
@@ -77,11 +84,23 @@ pub fn diff_lines(old: &str, new: &str) -> Vec<DiffLine> {
     out
 }
 
+/// What accepting a proposal does to its cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Replace the source.
+    Edit,
+    /// Keep the cell, which was inserted for the proposal; rejecting removes it.
+    Insert,
+    /// Delete the cell.
+    Delete,
+}
+
 /// An edit the assistant proposes for one cell.
 #[derive(Debug, Clone)]
 pub struct Proposal {
     /// Names the proposal to whoever made it.
     pub id: u64,
+    pub kind: Kind,
     /// The source the cell gets when the proposal is accepted.
     pub after: String,
     /// The source the diff was taken against.
@@ -91,9 +110,20 @@ pub struct Proposal {
 
 impl Proposal {
     pub fn new(id: u64, base: &str, after: String) -> Self {
+        Self::of(id, Kind::Edit, base, after)
+    }
+
+    /// A proposal of `kind`; deleting a cell shows its whole source removed.
+    pub fn of(id: u64, kind: Kind, base: &str, after: String) -> Self {
+        let after = if kind == Kind::Delete {
+            String::new()
+        } else {
+            after
+        };
         let lines = diff_lines(base, &after);
         Proposal {
             id,
+            kind,
             after,
             base: base.to_string(),
             lines,
@@ -160,20 +190,28 @@ impl Proposal {
     }
 }
 
-fn hint(theme: &Theme) -> Line<'static> {
+fn hint(kind: Kind, theme: &Theme) -> Line<'static> {
     let ui = &theme.ui;
     let key = |s: &'static str, st: Style| Span::styled(s, st.add_modifier(Modifier::BOLD));
     let muted = |s: &'static str| Span::styled(s, theme.muted());
-    Line::from(vec![
+    let (yes, no) = match kind {
+        Kind::Edit => (" accept   ", " reject   "),
+        Kind::Insert => (" keep cell   ", " discard   "),
+        Kind::Delete => (" delete cell   ", " keep"),
+    };
+    let mut spans = vec![
         key("± claude", Style::default().fg(ui.warning)),
         muted("   "),
         key("Tab", Style::default().fg(ui.focus)),
-        muted(" accept   "),
+        muted(yes),
         key("X", theme.error()),
-        muted(" reject   "),
-        key("⏎", Style::default().fg(ui.focus)),
-        muted(" edit first"),
-    ])
+        muted(no),
+    ];
+    if kind != Kind::Delete {
+        spans.push(key("⏎", Style::default().fg(ui.focus)));
+        spans.push(muted(" edit first"));
+    }
+    Line::from(spans)
 }
 
 /// Draw the proposal at column `x`, `cw` columns wide, its first row at
@@ -213,7 +251,7 @@ pub fn render(
         }
     }
     if let Some(y) = visible(rows.len()) {
-        buf.set_line(x, y, &hint(theme), cw);
+        buf.set_line(x, y, &hint(p.kind, theme), cw);
     }
 }
 
@@ -247,6 +285,14 @@ mod tests {
         assert_eq!(tags("a\nb\nc", "a\nc"), " a\n-b\n c");
         assert_eq!(tags("x", "y\nz"), "-x\n+y\n+z");
         assert_eq!(tags("same", "same"), " same");
+    }
+
+    #[test]
+    fn new_and_deleted_cells_are_one_run() {
+        assert_eq!(tags("", "a\nb"), "+a\n+b");
+        assert_eq!(tags("a\nb", ""), "-a\n-b");
+        let p = Proposal::of(1, Kind::Delete, "a\nb", "ignored".into());
+        assert_eq!((p.after.as_str(), p.changed()), ("", (0, 2)));
     }
 
     #[test]

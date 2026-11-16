@@ -114,6 +114,32 @@ fn media_image(media: &Media, plotly_png: PlotlyPng) -> Option<Image> {
 /// One cell for the model: its source and outputs as tagged text, and its
 /// figures in the order the text mentions them. `number` counts from 1.
 pub fn cell_context(cell: &Cell, number: usize, plotly_png: PlotlyPng) -> (String, Vec<Image>) {
+    cell_context_from(cell, number, 0, plotly_png)
+}
+
+/// Several cells, their figures numbered through. `cells` pairs each cell
+/// with its number (from 1).
+pub fn cells_context(cells: &[(usize, &Cell)], plotly_png: PlotlyPng) -> (String, Vec<Image>) {
+    let mut text = String::new();
+    let mut images = Vec::new();
+    for (number, cell) in cells {
+        let (t, imgs) = cell_context_from(cell, *number, images.len(), plotly_png);
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&t);
+        images.extend(imgs);
+    }
+    (text, images)
+}
+
+/// `cell_context` with its figures numbered after `first_image` earlier ones.
+fn cell_context_from(
+    cell: &Cell,
+    number: usize,
+    first_image: usize,
+    plotly_png: PlotlyPng,
+) -> (String, Vec<Image>) {
     let mut out = format!(
         "<cell number=\"{number}\" id=\"{}\" kind=\"{}\"",
         cell.id,
@@ -165,7 +191,7 @@ pub fn cell_context(cell: &Cell, number: usize, plotly_png: PlotlyPng) -> (Strin
                         images.push(img);
                         out.push_str(&format!(
                             "<output type=\"figure\">[attached as image {}]</output>\n",
-                            images.len()
+                            first_image + images.len()
                         ));
                     }
                     None => {}
@@ -210,7 +236,11 @@ side panel next to their open notebook, so keep answers short and use plain mark
 blocks. Each message starts with a <saturn-context> block that shows the cell the user is looking at, with its \
 outputs and figures; treat it as what \"this\", \"the plot\" or \"the error\" refer to. The open notebook belongs to \
 saturn: never read or change its .ipynb file with file tools or NotebookEdit, because saturn holds it in memory and \
-would overwrite your change. When the user wants a cell changed, show the new source in a fenced code block.";
+would overwrite your change. Work on the notebook with the saturn tools instead: notebook_outline and read_cells to \
+look at other cells, propose_edit to change a cell, insert_cell and delete_cell to add or remove one, and run_cells \
+to execute code and see the results. Edits, new cells and deletions are shown to the user in the notebook as a diff \
+that they accept or reject, so make the change with the tool rather than pasting the code into the chat, and say in \
+a sentence what you proposed. Cells are numbered from 1; the numbers shift when cells are added or removed.";
 
 #[cfg(test)]
 mod tests {
@@ -307,6 +337,29 @@ mod tests {
         let (_, images) = cell_context(&cell, 1, &png);
         assert_eq!(images, vec![Image::png(b"png")]);
         assert!(cell_context(&cell, 1, &none).1.is_empty());
+    }
+
+    #[test]
+    fn figures_of_several_cells_are_numbered_through() {
+        let figure = || Output::DisplayData {
+            data: media(vec![MediaType::Png("aGk=".into())]),
+            metadata: Map::new(),
+            display_id: None,
+        };
+        let mut a = Cell::new(CellKind::Code, "a");
+        a.outputs.push(figure());
+        let mut b = Cell::new(CellKind::Code, "b");
+        b.outputs.push(figure());
+        let (text, images) = cells_context(&[(2, &a), (5, &b)], &none);
+        assert_eq!(images.len(), 2);
+        assert!(
+            text.contains("<cell number=\"2\"") && text.contains("<cell number=\"5\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("[attached as image 1]") && text.contains("[attached as image 2]"),
+            "{text}"
+        );
     }
 
     #[test]
