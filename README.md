@@ -95,7 +95,10 @@ login: no API key, and saturn never sees your credentials.
 - **It is the full Claude Code agent.** Besides the notebook it can read, search and edit the
   project and run commands; anything that needs permission asks in the panel (`y` once, `a` for
   the session, `n` deny). Running cells asks too.
-- `Ctrl+P` has "Assistant: explain this output", "fix this error" and "new chat".
+- **Model and effort** switch from `Ctrl+P`: "Assistant: select model…" changes the panel's model
+  in place, "Assistant: select effort…" restarts its process and resumes the conversation. Both are
+  saved to `config.toml` and show in the panel's header.
+- `Ctrl+P` also has "Assistant: explain this output", "fix this error" and "new chat".
 
 The panel's process starts in the notebook's git root, so the project's `CLAUDE.md` applies.
 
@@ -117,9 +120,9 @@ icons = true          # needs a Nerd Font
 [assistant]
 enabled = true
 command = "claude"
-model = ""            # the panel's model; empty is your account's default
-inline_model = "haiku"
-effort = ""           # low … max; empty is the CLI's default
+model = ""            # the panel's model (fable, opus, sonnet, haiku); empty is your account's default
+inline_model = "haiku"  # the model behind Ctrl+G
+effort = ""           # low, medium, high, xhigh or max; empty is the CLI's default
 user_mcp = false      # also load the MCP servers set up for Claude Code
 use_api_key = false   # true bills ANTHROPIC_API_KEY instead of the subscription
 ```

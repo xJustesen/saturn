@@ -91,6 +91,10 @@ pub enum ItemData {
     Theme(String),
     /// A repository from the dashboard's Projects list.
     Project(PathBuf),
+    /// A model for the assistant panel ("default" is the account's).
+    Model(String),
+    /// A reasoning effort for the assistant panel ("default" is the CLI's).
+    Effort(String),
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +110,8 @@ pub enum PaletteKind {
     Kernels,
     Themes,
     Projects,
+    /// The assistant's model and effort pickers.
+    Assistant,
 }
 
 pub struct PaletteState {
@@ -329,6 +335,7 @@ ASSISTANT (your Claude Code login)
   Ctrl+G         ask for a change to this cell, inline
   Tab / X / Enter  on a proposed change: accept / reject / accept and edit
   in the panel   Enter send · Alt+Enter new line · Ctrl+C stop · q close
+  Ctrl+P         Assistant: select model / select effort / new chat
 ";
 
 fn render_help(buf: &mut Buffer, area: Rect, theme: &Theme) {

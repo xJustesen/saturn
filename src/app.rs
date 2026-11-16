@@ -148,6 +148,16 @@ pub struct App {
     pub kernel: Option<KernelHandle>,
     /// The assistant's `claude` process, once something has started it.
     pub ai: Option<AiHandle>,
+    /// The panel conversation's session id.
+    ai_session: Option<String>,
+    /// A turn has finished in that session, so there is something on disk
+    /// for a restarted process to resume.
+    ai_has_turn: bool,
+    /// The session the next panel process continues.
+    ai_resume: Option<String>,
+    /// Restart the panel's process when the running turn ends (a setting
+    /// that only applies at start changed).
+    ai_restart: bool,
     /// The lean `claude` process behind the inline prompt.
     quick: Option<AiHandle>,
     /// What that process has said in the turn that is running.
@@ -233,6 +243,10 @@ impl App {
             plotly,
             kernel: None,
             ai: None,
+            ai_session: None,
+            ai_has_turn: false,
+            ai_resume: None,
+            ai_restart: false,
             quick: None,
             quick_text: String::new(),
             quick_label: format!("claude · {}", cfg.assistant.inline_model),
@@ -403,10 +417,11 @@ impl App {
         }
         let chat = self.chat.get_or_insert_with(ChatState::new);
         match ev {
-            AiEvent::Ready { model, .. } => {
+            AiEvent::Ready { model, session_id, .. } => {
                 if let Some(m) = model {
                     chat.model = short_model(&m);
                 }
+                self.ai_session = Some(session_id);
             }
             AiEvent::TextDelta(text) => chat.push_delta(&text),
             // What a subagent does stays inside its own tool row.
@@ -451,6 +466,11 @@ impl App {
                 if usage.context_tokens > 0 {
                     chat.usage = tokens(usage.context_tokens);
                 }
+                self.ai_has_turn = true;
+                if std::mem::take(&mut self.ai_restart) {
+                    self.restart_ai();
+                }
+                let Some(chat) = &mut self.chat else { return };
                 match outcome {
                     TurnOutcome::Completed => {}
                     TurnOutcome::Interrupted => chat.notice("interrupted", false),
@@ -830,6 +850,7 @@ impl App {
             let mut cfg = self.ai_config();
             cfg.model = Some(self.cfg.assistant.model.clone()).filter(|m| !m.is_empty());
             cfg.effort = Some(self.cfg.assistant.effort.clone()).filter(|e| !e.is_empty());
+            cfg.resume = self.ai_resume.take();
             cfg.system_prompt = Some(context::SYSTEM_PROMPT.to_string());
             cfg.disallowed_tools = vec!["NotebookEdit".to_string()];
             cfg.tools = tools::specs();
@@ -918,6 +939,10 @@ impl App {
         if let Some(ai) = self.ai.take() {
             ai.send(AiCommand::Shutdown);
         }
+        self.ai_session = None;
+        self.ai_has_turn = false;
+        self.ai_resume = None;
+        self.ai_restart = false;
         self.chat = Some(ChatState::new());
         self.chat_open = true;
         self.focus = Focus::Chat;
@@ -925,9 +950,101 @@ impl App {
         self.ensure_ai();
     }
 
-    /// What the next prompt is about: the focused cell.
+    /// Start the panel's process again so a start-up setting applies; the
+    /// conversation carries on in the new process.
+    fn restart_ai(&mut self) {
+        if let Some(ai) = self.ai.take() {
+            ai.send(AiCommand::Shutdown);
+        }
+        self.ai_resume = self.ai_session.clone().filter(|_| self.ai_has_turn);
+        self.ensure_ai();
+    }
+
+    const AI_MODELS: [(&'static str, &'static str); 5] = [
+        ("default", "your account's default model"),
+        ("fable", "most capable"),
+        ("opus", "strong at long, hard tasks"),
+        ("sonnet", "balanced"),
+        ("haiku", "fastest"),
+    ];
+    const AI_EFFORTS: [(&'static str, &'static str); 6] = [
+        ("default", "the CLI's default"),
+        ("low", "quickest answers"),
+        ("medium", ""),
+        ("high", ""),
+        ("xhigh", ""),
+        ("max", "slowest, most thorough"),
+    ];
+
+    /// A picker over `choices`, with the one in use marked and selected.
+    fn open_assistant_picker(&mut self, title: &str, choices: &[(&str, &str)], current: &str, data: fn(String) -> ItemData) {
+        if !self.cfg.assistant.enabled {
+            self.flash(ASSISTANT_OFF);
+            return;
+        }
+        let current = if current.is_empty() { "default" } else { current };
+        let items: Vec<PaletteItem> = choices
+            .iter()
+            .map(|(name, note)| PaletteItem {
+                label: name.to_string(),
+                detail: match (*name == current, note.is_empty()) {
+                    (true, true) => "current".to_string(),
+                    (true, false) => format!("{note} · current"),
+                    (false, _) => note.to_string(),
+                },
+                data: data(name.to_string()),
+            })
+            .collect();
+        let mut p = PaletteState::new(PaletteKind::Assistant, title, items);
+        if let Some(i) = p.items.iter().position(|it| it.label == current) {
+            p.selected = i;
+        }
+        self.overlay = Some(Overlay::Palette(p));
+    }
+
+    /// Keep an `[assistant]` choice in the config file and say what happened.
+    fn save_assistant_choice(&mut self, key: &str, value: &str, said: String) {
+        match self.cfg.save_assistant(key, value) {
+            Ok(_) => self.flash(said),
+            Err(e) => self.flash_err(format!("{said}, but not saved: {e:#}")),
+        }
+    }
+
+    /// Switch the panel's model. A running process switches in place.
+    fn set_ai_model(&mut self, model: String) {
+        self.cfg.assistant.model = if model == "default" { String::new() } else { model.clone() };
+        if let Some(ai) = self.ai.as_ref().filter(|a| a.is_alive()) {
+            ai.send(AiCommand::SetModel(model.clone()));
+        }
+        let value = self.cfg.assistant.model.clone();
+        self.save_assistant_choice("model", &value, format!("assistant model: {model}"));
+    }
+
+    /// Switch the panel's reasoning effort. The CLI only takes it at start,
+    /// so a running process is restarted and resumes the conversation, after
+    /// the turn that is running.
+    fn set_ai_effort(&mut self, effort: String) {
+        self.cfg.assistant.effort = if effort == "default" { String::new() } else { effort.clone() };
+        let busy = self.chat.as_ref().is_some_and(|c| c.busy);
+        let mut said = format!("assistant effort: {effort}");
+        if self.ai.as_ref().is_some_and(AiHandle::is_alive) {
+            if busy {
+                self.ai_restart = true;
+                said.push_str(" (from the next turn)");
+            } else {
+                self.restart_ai();
+            }
+        }
+        self.refresh_chat_chips();
+        let value = self.cfg.assistant.effort.clone();
+        self.save_assistant_choice("effort", &value, said);
+    }
+
+    /// What the next prompt is about: the focused cell. Also keeps the
+    /// header's effort label current.
     fn refresh_chat_chips(&mut self) {
         let Some(chat) = &mut self.chat else { return };
+        chat.effort = self.cfg.assistant.effort.clone();
         chat.chips.clear();
         let Some(cell) = self.nb.cells.get(self.focused) else { return };
         let kind = match cell.kind {
@@ -1874,6 +1991,14 @@ impl App {
             }
             Command::CloseChat => self.close_chat(),
             Command::AskInline => self.open_inline_prompt(),
+            Command::SelectAiModel => {
+                let current = self.cfg.assistant.model.clone();
+                self.open_assistant_picker("Assistant model", &Self::AI_MODELS, &current, ItemData::Model);
+            }
+            Command::SelectAiEffort => {
+                let current = self.cfg.assistant.effort.clone();
+                self.open_assistant_picker("Assistant effort", &Self::AI_EFFORTS, &current, ItemData::Effort);
+            }
             Command::ExplainOutput => {
                 self.ask_chat("Explain what this cell's output shows. Lead with the main takeaway, then anything surprising or worth checking.")
             }
@@ -2678,6 +2803,8 @@ impl App {
         match data {
             ItemData::Command(cmd) => self.dispatch(cmd),
             ItemData::Theme(name) => self.set_theme(&name),
+            ItemData::Model(model) => self.set_ai_model(model),
+            ItemData::Effort(effort) => self.set_ai_effort(effort),
             ItemData::Project(path) => self.open_file_picker(path, None),
             ItemData::Kernel(i) => {
                 let spec = self.kernelspecs.as_ref().and_then(|s| s.get(i)).cloned();

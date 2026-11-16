@@ -118,6 +118,8 @@ pub struct ChatState {
     /// A turn is running.
     pub busy: bool,
     pub model: String,
+    /// Reasoning effort, when one is set ("high").
+    pub effort: String,
     /// Context use, as shown in the header ("12k").
     pub usage: String,
 }
@@ -143,6 +145,7 @@ impl ChatState {
             ask: None,
             busy: false,
             model: String::new(),
+            effort: String::new(),
             usage: String::new(),
         }
     }
@@ -400,11 +403,11 @@ pub fn render(
         "claude",
         title.add_modifier(Modifier::BOLD),
     );
-    let info = match (st.model.is_empty(), st.usage.is_empty()) {
-        (false, false) => format!("{} · {}", st.model, st.usage),
-        (false, true) => st.model.clone(),
-        _ => st.usage.clone(),
-    };
+    let info = [st.model.as_str(), st.effort.as_str(), st.usage.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
     let info = cut(&info, area.width.saturating_sub(12) as usize);
     let iw = Line::from(info.as_str()).width() as u16;
     buf.set_string(

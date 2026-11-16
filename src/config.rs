@@ -191,6 +191,47 @@ impl Config {
         write_key(&path, "theme", self.theme.as_str())?;
         Ok(path)
     }
+
+    /// Write one `[assistant]` key to the config file, leaving the rest as it is.
+    pub fn save_assistant(&self, key: &str, value: &str) -> Result<PathBuf> {
+        let path = Self::path().context("no config directory")?;
+        write_table_key(&path, "assistant", key, value)?;
+        Ok(path)
+    }
+}
+
+/// Set `key = value` inside `[table]` of a TOML file, creating the table when
+/// it is missing and leaving every other line as it was. A file that does
+/// not parse is left untouched and reported as an error.
+pub fn write_table_key(path: &Path, table: &str, key: &str, value: impl Into<toml_edit::Value>) -> Result<()> {
+    let mut doc = match std::fs::read_to_string(path) {
+        Ok(s) => s
+            .parse::<toml_edit::DocumentMut>()
+            .with_context(|| format!("{} is not valid TOML", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let item = doc.entry(table).or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(tbl) = item.as_table_like_mut() else {
+        anyhow::bail!("`{table}` in {} is not a table", path.display());
+    };
+    let mut value: toml_edit::Value = value.into();
+    match tbl.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+        Some(existing) => {
+            *value.decor_mut() = existing.decor().clone();
+            *existing = value;
+        }
+        None => {
+            tbl.insert(key, toml_edit::Item::Value(value));
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string()).with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
+    Ok(())
 }
 
 /// Set one top-level `key = value` in a TOML file, leaving every other line
@@ -227,6 +268,23 @@ pub fn write_key(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_table_key_adds_the_table_and_keeps_the_rest() {
+        let dir = std::env::temp_dir().join(format!("saturn-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("table.toml");
+        std::fs::write(&path, "# mine\ntheme = \"monokai\"\n").unwrap();
+        write_table_key(&path, "assistant", "model", "opus").unwrap();
+        write_table_key(&path, "assistant", "effort", "high").unwrap();
+        write_table_key(&path, "assistant", "model", "sonnet").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# mine\ntheme = \"monokai\"\n"), "{text}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!((cfg.assistant.model.as_str(), cfg.assistant.effort.as_str()), ("sonnet", "high"));
+        assert_eq!(cfg.theme, "monokai");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_assistant_table_is_optional_and_overridable() {
