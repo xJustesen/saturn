@@ -48,11 +48,16 @@ pub fn measure(cell: &mut Cell, editing: bool, width: u16, ctx: &mut CellCtx) ->
     let cw = content_width(width);
     let tab = ctx.cfg.tab_width;
     let wrap = ctx.cfg.wrap;
-    let source_rows = match (&cell.editor, editing) {
-        (Some(ed), true) => {
+    let ext = if cell.kind == CellKind::Markdown { "md" } else { ctx.lang_ext };
+    if !editing && let Some(p) = &mut cell.proposal {
+        p.rebase(&cell.source);
+    }
+    let source_rows = match (&cell.editor, editing, &cell.proposal) {
+        (Some(ed), true, _) => {
             let g = editor_gutter(ed.line_count(), ctx.line_numbers);
             ed.rows((cw as usize).saturating_sub(g).max(1), tab, wrap) as u16
         }
+        (_, _, Some(p)) => p.rows(cw, ext, ctx.theme, tab),
         _ => match cell.kind {
             CellKind::Markdown => {
                 if cell.source.trim().is_empty() {
@@ -260,6 +265,12 @@ pub fn render(
             let opts = EditorOpts { theme, base: theme.base(), ext, numbers, wrap, tab };
             if let Some(p) = draw_editor(ed, &opts, cx, cw, layout.source_rows, area, top, buf) {
                 cursor = Some(p);
+            }
+        }
+        _ if cell.proposal.is_some() => {
+            let ext = if cell.kind == CellKind::Markdown { "md" } else { ctx.lang_ext };
+            if let Some(p) = &cell.proposal {
+                crate::ui::diff::render(p, cx, cw, area, top, ext, theme, tab, buf);
             }
         }
         _ => {

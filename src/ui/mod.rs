@@ -4,6 +4,7 @@ pub mod cell;
 pub mod cell_picker;
 pub mod chat;
 pub mod dashboard;
+pub mod diff;
 pub mod dashboard_logo;
 pub mod file_picker;
 pub mod fuzzy;

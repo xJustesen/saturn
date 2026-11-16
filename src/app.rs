@@ -39,6 +39,7 @@ use crate::ui::cell::content_width;
 use crate::ui::cell_picker::{CellPickerState, PickerAction};
 use crate::ui::chat::{ChatAction, ChatState};
 use crate::ui::dashboard::{DashAction, DashItem, DashboardState};
+use crate::ui::diff::Proposal;
 use crate::ui::layout::LayoutCache;
 use crate::ui::file_picker::{FileAction, FilePickerState, PickerCtx, ThreadIo};
 use crate::ui::overlay::{
@@ -131,6 +132,8 @@ pub struct App {
     /// The assistant panel, while it is open.
     pub chat: Option<ChatState>,
     pub focus: Focus,
+    /// Id of the last proposed edit.
+    next_proposal: u64,
     pub search: SearchState,
     pub lang_ext: String,
     pub line_numbers: bool,
@@ -200,6 +203,7 @@ impl App {
             overlay: None,
             chat: None,
             focus: Focus::Notebook,
+            next_proposal: 0,
             search: SearchState::default(),
             lang_ext: "py".to_string(),
             view: Rect::default(),
@@ -615,6 +619,9 @@ impl App {
             self.dispatch(cmd);
             return;
         }
+        if self.mode == Mode::Command && self.pending.is_empty() && self.on_proposal_key(&key) {
+            return;
+        }
         match self.mode {
             Mode::Edit => self.on_edit_key(key),
             Mode::Command => match keymap::command_mode(&self.pending, &key) {
@@ -680,6 +687,55 @@ impl App {
             label.push_str(" · output");
         }
         chat.chips.push(label);
+    }
+
+    // ----- proposed edits -------------------------------------------------------
+
+    /// Show `after` as a proposed edit on cell `idx`, as a diff the user
+    /// accepts or rejects. Returns the proposal's id.
+    pub fn propose_edit(&mut self, idx: usize, after: String) -> Option<u64> {
+        if self.mode == Mode::Edit && idx == self.focused {
+            self.leave_edit();
+        }
+        let cell = self.nb.cells.get_mut(idx)?;
+        self.next_proposal += 1;
+        cell.proposal = Some(Proposal::new(self.next_proposal, &cell.source, after));
+        self.layout.invalidate_cell(idx);
+        Some(self.next_proposal)
+    }
+
+    /// Accept or reject the proposal on the focused cell. Returns its id.
+    fn settle_proposal(&mut self, accept: bool) -> Option<u64> {
+        let idx = self.focused;
+        let p = self.nb.cells.get_mut(idx)?.proposal.take()?;
+        if accept {
+            let before = self.nb.cells[idx].clone();
+            let mut after = before.clone();
+            after.set_source(p.after);
+            self.nb.apply(CellOp::Replace { idx, before, after });
+            self.cache.invalidate_cell(&self.nb.cells[idx].id.clone());
+        }
+        self.layout.invalidate_cell(idx);
+        self.scroll_to_focused();
+        Some(p.id)
+    }
+
+    /// Keys of a cell that shows a proposal: Tab accepts, `X` rejects and
+    /// Enter accepts and opens the cell for editing.
+    fn on_proposal_key(&mut self, key: &KeyEvent) -> bool {
+        if self.nb.cells.get(self.focused).is_none_or(|c| c.proposal.is_none()) {
+            return false;
+        }
+        match key.code {
+            KeyCode::Tab => self.dispatch(Command::AcceptProposal),
+            KeyCode::Char('X') => self.dispatch(Command::RejectProposal),
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                self.dispatch(Command::AcceptProposal);
+                self.enter_edit(false);
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn on_edit_key(&mut self, key: KeyEvent) {
@@ -1132,6 +1188,16 @@ impl App {
                 }
             }
             Command::CloseChat => self.close_chat(),
+            Command::AcceptProposal => {
+                if self.settle_proposal(true).is_none() {
+                    self.flash("no proposed edit on this cell");
+                }
+            }
+            Command::RejectProposal => {
+                if self.settle_proposal(false).is_none() {
+                    self.flash("no proposed edit on this cell");
+                }
+            }
         }
     }
 

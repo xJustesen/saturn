@@ -130,6 +130,8 @@ pub const UI_KEYS: &[&str] = &[
     "mode_visual",
     "mode_search",
     "mode_chat",
+    "diff_add_bg",
+    "diff_del_bg",
 ];
 
 // ----- theme files ----------------------------------------------------------
@@ -341,6 +343,10 @@ pub struct Ui {
     pub mode_search: Color,
     /// The mode label while the assistant panel has the keys.
     pub mode_chat: Color,
+    /// Row tints of a proposed edit: added and removed lines. Derived from
+    /// `background` when unset; `None` leaves the signs to carry the diff.
+    pub diff_add_bg: Option<Color>,
+    pub diff_del_bg: Option<Color>,
 }
 
 impl Ui {
@@ -370,6 +376,11 @@ impl Ui {
         let warning = get("warning").unwrap_or(Color::Yellow);
         let mode_fg = get("mode_fg").unwrap_or(background.unwrap_or(Color::Black));
         let mode_search = get("mode_search").unwrap_or(info);
+        let error = get("error").unwrap_or(Color::Red);
+        let tint = |key: &str, toward: Color| match map.get(key) {
+            Some(_) => get(key).filter(|c| *c != Color::Reset),
+            None => background.and_then(|b| mix(b, toward, 14)),
+        };
         Ui {
             background,
             foreground,
@@ -383,7 +394,7 @@ impl Ui {
             },
             focus,
             edit,
-            error: get("error").unwrap_or(Color::Red),
+            error,
             warning,
             info,
             success,
@@ -406,6 +417,8 @@ impl Ui {
             mode_visual: get("mode_visual").unwrap_or(Color::Magenta),
             mode_search,
             mode_chat: get("mode_chat").unwrap_or(Color::Magenta),
+            diff_add_bg: tint("diff_add_bg", edit),
+            diff_del_bg: tint("diff_del_bg", error),
         }
     }
 }

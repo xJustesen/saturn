@@ -111,6 +111,11 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     }
 
     let mut right: Vec<Span> = Vec::new();
+    let proposals = app.nb.cells.iter().filter(|c| c.proposal.is_some()).count();
+    if proposals > 0 {
+        let s = if proposals == 1 { "" } else { "s" };
+        right.push(Span::styled(format!("± {proposals} proposal{s}   "), Style::default().fg(ui.warning)));
+    }
     match &app.kernel {
         Some(k) => {
             let (icon, st) = match k.status {
