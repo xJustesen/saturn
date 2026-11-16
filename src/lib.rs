@@ -1,5 +1,6 @@
 //! saturn — a keyboard-first TUI Jupyter notebook.
 
+pub mod ai;
 pub mod app;
 pub mod commands;
 pub mod config;
