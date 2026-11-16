@@ -1010,9 +1010,17 @@ impl App {
         }
     }
 
+    /// How a configured model shows before the CLI has named the real one.
+    fn model_label(configured: &str) -> String {
+        if configured.is_empty() { "default".to_string() } else { configured.to_string() }
+    }
+
     /// Switch the panel's model. A running process switches in place.
     fn set_ai_model(&mut self, model: String) {
         self.cfg.assistant.model = if model == "default" { String::new() } else { model.clone() };
+        if let Some(chat) = &mut self.chat {
+            chat.model = Self::model_label(&self.cfg.assistant.model);
+        }
         if let Some(ai) = self.ai.as_ref().filter(|a| a.is_alive()) {
             ai.send(AiCommand::SetModel(model.clone()));
         }
@@ -1045,6 +1053,11 @@ impl App {
     fn refresh_chat_chips(&mut self) {
         let Some(chat) = &mut self.chat else { return };
         chat.effort = self.cfg.assistant.effort.clone();
+        // The CLI names the model it really uses with the first turn; until
+        // then the header shows the one that was asked for.
+        if chat.model.is_empty() {
+            chat.model = Self::model_label(&self.cfg.assistant.model);
+        }
         chat.chips.clear();
         let Some(cell) = self.nb.cells.get(self.focused) else { return };
         let kind = match cell.kind {
