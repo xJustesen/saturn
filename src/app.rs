@@ -1861,7 +1861,9 @@ impl App {
                 if !self.cfg.assistant.enabled {
                     self.flash(ASSISTANT_OFF);
                 } else if self.chat_has_keys() {
-                    self.focus = Focus::Notebook;
+                    // A toggle: the panel that has the keys closes. One that
+                    // is open beside the notebook takes the keys instead.
+                    self.close_chat();
                 } else {
                     self.chat.get_or_insert_with(ChatState::new);
                     self.chat_open = true;

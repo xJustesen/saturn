@@ -87,8 +87,8 @@ saturn runs your own `claude` CLI in the background, so the assistant uses your 
 login: no API key, and saturn never sees your credentials.
 
 - **`Ctrl+L`** opens a chat panel beside the notebook. Each prompt carries the focused cell, its
-  outputs and its figures, so "why is this plot empty?" works as asked. `Ctrl+L` or `Esc` goes back
-  to the notebook; the panel stays open.
+  outputs and its figures, so "why is this plot empty?" works as asked. `Ctrl+L` again closes the
+  panel (the conversation is kept); `Esc` goes back to the notebook and leaves it open.
 - **`Ctrl+G`** opens a one-line prompt under the cell for a quick edit, answered by a fast model.
 - **Changes are proposals.** An edit, a new cell or a deletion shows in the notebook as a diff:
   `Tab` accepts (one undo step), `X` rejects, `Enter` accepts and opens the cell.

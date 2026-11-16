@@ -89,9 +89,9 @@ pub enum ChatAction {
     Send(String),
     /// Stop the turn that is running.
     Interrupt,
-    /// Give the keys back to the notebook; the panel stays.
+    /// Give the keys back to the notebook; the panel stays (Esc).
     Blur,
-    /// Close the panel.
+    /// Hide the panel (Ctrl+L, or `q` in normal mode).
     Close,
 }
 
@@ -235,7 +235,7 @@ impl ChatState {
         let half = (self.view_rows / 2).max(1);
         if self.ask.is_some() {
             let answer = match key.code {
-                KeyCode::Char('l') if ctrl => return ChatAction::Blur,
+                KeyCode::Char('l') if ctrl => return ChatAction::Close,
                 KeyCode::Char('c') if ctrl => return ChatAction::Interrupt,
                 KeyCode::Char('y') | KeyCode::Enter => Answer::Once,
                 KeyCode::Char('a') => Answer::Always,
@@ -248,7 +248,7 @@ impl ChatState {
             };
         }
         match key.code {
-            KeyCode::Char('l') if ctrl => return ChatAction::Blur,
+            KeyCode::Char('l') if ctrl => return ChatAction::Close,
             KeyCode::Char('c') if ctrl => {
                 return if self.busy {
                     ChatAction::Interrupt
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(st.handle_key(key(KeyCode::Char('q'))), ChatAction::Close);
         assert_eq!(
             st.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
-            ChatAction::Blur
+            ChatAction::Close
         );
     }
 

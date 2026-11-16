@@ -132,7 +132,7 @@ pub const PALETTE: &[CommandInfo] = &[
     CommandInfo { cmd: Command::Search, name: "Search notebook…", keys: "/" },
     CommandInfo { cmd: Command::SearchNext, name: "Next search match", keys: "n" },
     CommandInfo { cmd: Command::SearchPrev, name: "Previous search match", keys: "N" },
-    CommandInfo { cmd: Command::ToggleChat, name: "Assistant: open / focus panel", keys: "Ctrl+L" },
+    CommandInfo { cmd: Command::ToggleChat, name: "Assistant: toggle panel", keys: "Ctrl+L" },
     CommandInfo { cmd: Command::CloseChat, name: "Assistant: close panel", keys: "" },
     CommandInfo { cmd: Command::AskInline, name: "Assistant: ask for a change to this cell", keys: "Ctrl+G" },
     CommandInfo { cmd: Command::ExplainOutput, name: "Assistant: explain this output", keys: "" },
