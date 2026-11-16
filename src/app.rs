@@ -37,6 +37,7 @@ use crate::search::{self, Match, SearchInput, SearchState};
 use crate::ui;
 use crate::ui::cell::content_width;
 use crate::ui::cell_picker::{CellPickerState, PickerAction};
+use crate::ui::chat::{ChatAction, ChatState};
 use crate::ui::dashboard::{DashAction, DashItem, DashboardState};
 use crate::ui::layout::LayoutCache;
 use crate::ui::file_picker::{FileAction, FilePickerState, PickerCtx, ThreadIo};
@@ -84,6 +85,14 @@ pub enum Mode {
     Edit,
 }
 
+/// Which pane of the notebook screen has the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Notebook,
+    /// The assistant panel.
+    Chat,
+}
+
 /// What sits under the overlays: the start dashboard or the notebook.
 pub enum Screen {
     Dashboard(DashboardState),
@@ -119,6 +128,9 @@ pub struct App {
     pub clipboard: Vec<Cell>,
     pub flash: Option<Flash>,
     pub overlay: Option<Overlay>,
+    /// The assistant panel, while it is open.
+    pub chat: Option<ChatState>,
+    pub focus: Focus,
     pub search: SearchState,
     pub lang_ext: String,
     pub line_numbers: bool,
@@ -186,6 +198,8 @@ impl App {
             clipboard: Vec::new(),
             flash: None,
             overlay: None,
+            chat: None,
+            focus: Focus::Notebook,
             search: SearchState::default(),
             lang_ext: "py".to_string(),
             view: Rect::default(),
@@ -343,10 +357,15 @@ impl App {
             },
             AppEvent::Terminal(Event::Key(key)) => {
                 self.on_key(key);
+                self.refresh_chat_chips();
                 self.dirty_ui = true;
             }
             AppEvent::Terminal(Event::Paste(text)) => {
-                if self.mode == Mode::Edit {
+                if self.overlay.is_none() && self.chat_has_keys() {
+                    if let Some(c) = &mut self.chat {
+                        c.paste(text);
+                    }
+                } else if self.mode == Mode::Edit {
                     let idx = self.focused;
                     if let Some(ed) = self.nb.cells.get_mut(idx).and_then(|c| c.editor.as_mut()) {
                         ed.paste(text);
@@ -577,6 +596,16 @@ impl App {
             self.on_dash(action);
             return;
         }
+        if self.chat_has_keys() {
+            // Saving, the palette, the files picker and quitting stay global.
+            match keymap::global(&key) {
+                Some(cmd @ (Command::Save | Command::CommandPalette | Command::OpenFile | Command::Quit)) => {
+                    self.dispatch(cmd)
+                }
+                _ => self.on_chat_key(key),
+            }
+            return;
+        }
         if self.search.input.is_some() {
             self.on_search_key(key);
             return;
@@ -601,6 +630,56 @@ impl App {
                 }
             },
         }
+    }
+
+    // ----- assistant panel -----------------------------------------------------
+
+    /// The assistant panel is open on the notebook screen and has the keys.
+    fn chat_has_keys(&self) -> bool {
+        self.focus == Focus::Chat && self.chat.is_some() && matches!(self.screen, Screen::Notebook)
+    }
+
+    fn on_chat_key(&mut self, key: KeyEvent) {
+        let Some(chat) = &mut self.chat else { return };
+        match chat.handle_key(key) {
+            ChatAction::None | ChatAction::Interrupt => {}
+            ChatAction::Send(text) => {
+                chat.push_user(text);
+                chat.notice("The assistant is not connected yet.", false);
+            }
+            ChatAction::Blur => self.focus = Focus::Notebook,
+            ChatAction::Close => self.close_chat(),
+        }
+    }
+
+    fn close_chat(&mut self) {
+        self.chat = None;
+        self.focus = Focus::Notebook;
+    }
+
+    /// What the next prompt is about: the focused cell.
+    fn refresh_chat_chips(&mut self) {
+        let Some(chat) = &mut self.chat else { return };
+        chat.chips.clear();
+        let Some(cell) = self.nb.cells.get(self.focused) else { return };
+        let kind = match cell.kind {
+            CellKind::Code => "code",
+            CellKind::Markdown => "markdown",
+            CellKind::Raw => "raw",
+        };
+        let mut label = format!("cell {} · {kind}", self.focused + 1);
+        use jupyter_protocol::MediaType as M;
+        let figure = cell
+            .outputs
+            .iter()
+            .filter_map(Output::media)
+            .any(|m| m.content.iter().any(|t| matches!(t, M::Png(_) | M::Jpeg(_) | M::Gif(_) | M::Plotly(_))));
+        if figure {
+            label.push_str(" · figure");
+        } else if !cell.outputs.is_empty() {
+            label.push_str(" · output");
+        }
+        chat.chips.push(label);
     }
 
     fn on_edit_key(&mut self, key: KeyEvent) {
@@ -1040,6 +1119,19 @@ impl App {
                 }
             }
             Command::ForceQuit => self.quit = true,
+            Command::ToggleChat => {
+                if !matches!(self.screen, Screen::Notebook) {
+                    return;
+                }
+                if self.chat_has_keys() {
+                    self.focus = Focus::Notebook;
+                } else {
+                    self.chat.get_or_insert_with(ChatState::new);
+                    self.focus = Focus::Chat;
+                    self.refresh_chat_chips();
+                }
+            }
+            Command::CloseChat => self.close_chat(),
         }
     }
 

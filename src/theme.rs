@@ -129,6 +129,7 @@ pub const UI_KEYS: &[&str] = &[
     "mode_insert",
     "mode_visual",
     "mode_search",
+    "mode_chat",
 ];
 
 // ----- theme files ----------------------------------------------------------
@@ -338,6 +339,8 @@ pub struct Ui {
     pub mode_insert: Color,
     pub mode_visual: Color,
     pub mode_search: Color,
+    /// The mode label while the assistant panel has the keys.
+    pub mode_chat: Color,
 }
 
 impl Ui {
@@ -402,6 +405,7 @@ impl Ui {
             mode_insert: get("mode_insert").unwrap_or(edit),
             mode_visual: get("mode_visual").unwrap_or(Color::Magenta),
             mode_search,
+            mode_chat: get("mode_chat").unwrap_or(Color::Magenta),
         }
     }
 }

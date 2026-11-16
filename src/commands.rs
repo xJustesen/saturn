@@ -68,6 +68,8 @@ pub enum Command {
     ToggleLineNumbers,
     ToggleWrap,
     ShowLogPath,
+    ToggleChat,
+    CloseChat,
     Quit,
     ForceQuit,
 }
@@ -124,6 +126,8 @@ pub const PALETTE: &[CommandInfo] = &[
     CommandInfo { cmd: Command::Search, name: "Search notebook…", keys: "/" },
     CommandInfo { cmd: Command::SearchNext, name: "Next search match", keys: "n" },
     CommandInfo { cmd: Command::SearchPrev, name: "Previous search match", keys: "N" },
+    CommandInfo { cmd: Command::ToggleChat, name: "Assistant: open / focus panel", keys: "Ctrl+L" },
+    CommandInfo { cmd: Command::CloseChat, name: "Assistant: close panel", keys: "" },
     CommandInfo { cmd: Command::Help, name: "Show help", keys: "?" },
     CommandInfo { cmd: Command::ShowLogPath, name: "Show log file path", keys: "" },
     CommandInfo { cmd: Command::Quit, name: "Quit", keys: "q" },

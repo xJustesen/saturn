@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::app::{App, Mode, Screen};
+use crate::app::{App, Focus, Mode, Screen};
 use crate::kernel::KernelStatus;
 use crate::vim::Mode as VimMode;
 
@@ -36,6 +36,7 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     };
     let mode = |label: &'static str, bg: Color| (label, Style::default().bg(bg).fg(ui.mode_fg).add_modifier(Modifier::BOLD));
     let (mode_label, mode_style) = match app.mode {
+        _ if app.focus == Focus::Chat && app.chat.is_some() => mode(" CHAT ", ui.mode_chat),
         Mode::Command if app.search.input.is_some() => mode(" SEARCH ", ui.mode_search),
         Mode::Command => mode(" COMMAND ", ui.mode_command),
         Mode::Edit => {

@@ -1,0 +1,640 @@
+//! The docked assistant panel: transcript, context chips and the input, with
+//! its keys and drawing. The app feeds it what the assistant says and does,
+//! and acts on the [`ChatAction`] a key produces.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use edtui::LineNumbers;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Position, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+
+use crate::editor::CellEditor;
+use crate::render::render_markdown;
+use crate::theme::Theme;
+use crate::ui::cell::{EditorOpts, draw_editor};
+use crate::ui::text::{clean_text, cut, wrap_line};
+use crate::vim::Mode as VimMode;
+
+/// Narrowest panel that is still usable.
+pub const MIN_WIDTH: u16 = 40;
+/// Most rows the input grows to before it scrolls.
+const MAX_INPUT_ROWS: u16 = 8;
+/// Columns left of the text (the user bar and the prompt sit in them).
+const PAD_LEFT: u16 = 3;
+const PAD_RIGHT: u16 = 1;
+const HINTS: &str = "⏎ send  ⌥⏎ newline  esc normal";
+const EMPTY: &str = "Ask about the focused cell, its output or the project.";
+
+/// Panel width for a main area `width` columns wide, or `None` when the
+/// notebook and the panel do not fit side by side.
+pub fn docked_width(width: u16) -> Option<u16> {
+    let w = (width as u32 * 42 / 100) as u16;
+    let w = w.clamp(MIN_WIDTH, 80);
+    (width >= w + 56).then_some(w)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolState {
+    Running,
+    Done(String),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Item {
+    User(String),
+    Assistant(String),
+    Tool {
+        id: String,
+        name: String,
+        detail: String,
+        state: ToolState,
+    },
+    Notice {
+        text: String,
+        error: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    None,
+    /// Send this prompt.
+    Send(String),
+    /// Stop the turn that is running.
+    Interrupt,
+    /// Give the keys back to the notebook; the panel stays.
+    Blur,
+    /// Close the panel.
+    Close,
+}
+
+struct Row {
+    line: Line<'static>,
+    /// The user's own message: a bar in the left margin.
+    bar: bool,
+}
+
+pub struct ChatState {
+    items: Vec<Item>,
+    /// Wrapped rows per item at `rows_width`; `None` is stale.
+    rows: Vec<Option<Vec<Row>>>,
+    rows_width: u16,
+    pub input: CellEditor,
+    /// What the next prompt is about ("cell 7 · code · figure").
+    pub chips: Vec<String>,
+    /// Rows scrolled up from the newest row; 0 follows the transcript.
+    scroll: usize,
+    /// Transcript rows on screen, for paging.
+    view_rows: usize,
+    /// A turn is running.
+    pub busy: bool,
+    pub model: String,
+    /// Context use, as shown in the header ("12k").
+    pub usage: String,
+}
+
+impl Default for ChatState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChatState {
+    pub fn new() -> Self {
+        let mut input = CellEditor::new("");
+        input.enter_insert();
+        ChatState {
+            items: Vec::new(),
+            rows: Vec::new(),
+            rows_width: 0,
+            input,
+            chips: Vec::new(),
+            scroll: 0,
+            view_rows: 1,
+            busy: false,
+            model: String::new(),
+            usage: String::new(),
+        }
+    }
+
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+
+    fn push(&mut self, item: Item) {
+        self.items.push(item);
+        self.rows.push(None);
+        self.scroll = 0;
+    }
+
+    pub fn push_user(&mut self, text: impl Into<String>) {
+        self.push(Item::User(text.into()));
+    }
+
+    /// Streamed assistant text: extends the message being written.
+    pub fn push_delta(&mut self, text: &str) {
+        if let Some(Item::Assistant(t)) = self.items.last_mut() {
+            t.push_str(text);
+            if let Some(r) = self.rows.last_mut() {
+                *r = None;
+            }
+        } else {
+            self.push(Item::Assistant(text.to_string()));
+        }
+    }
+
+    pub fn tool_start(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        self.push(Item::Tool {
+            id: id.into(),
+            name: name.into(),
+            detail: detail.into(),
+            state: ToolState::Running,
+        });
+    }
+
+    pub fn tool_end(&mut self, id: &str, ok: bool, note: impl Into<String>) {
+        for (i, item) in self.items.iter_mut().enumerate().rev() {
+            if let Item::Tool { id: tid, state, .. } = item
+                && tid == id
+            {
+                *state = if ok {
+                    ToolState::Done(note.into())
+                } else {
+                    ToolState::Failed(note.into())
+                };
+                self.rows[i] = None;
+                return;
+            }
+        }
+    }
+
+    pub fn notice(&mut self, text: impl Into<String>, error: bool) {
+        self.push(Item::Notice {
+            text: text.into(),
+            error,
+        });
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.rows.clear();
+        self.scroll = 0;
+    }
+
+    pub fn paste(&mut self, text: String) {
+        self.input.paste(text);
+    }
+
+    fn scroll_by(&mut self, up: bool, rows: usize) {
+        self.scroll = if up {
+            self.scroll.saturating_add(rows)
+        } else {
+            self.scroll.saturating_sub(rows)
+        };
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> ChatAction {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+        let insert = matches!(self.input.mode(), VimMode::Insert | VimMode::Replace);
+        let half = (self.view_rows / 2).max(1);
+        match key.code {
+            KeyCode::Char('l') if ctrl => return ChatAction::Blur,
+            KeyCode::Char('c') if ctrl => {
+                return if self.busy {
+                    ChatAction::Interrupt
+                } else {
+                    ChatAction::None
+                };
+            }
+            KeyCode::PageUp => self.scroll_by(true, self.view_rows.max(1)),
+            KeyCode::PageDown => self.scroll_by(false, self.view_rows.max(1)),
+            KeyCode::Char('u') if ctrl && !insert => self.scroll_by(true, half),
+            KeyCode::Char('d') if ctrl && !insert => self.scroll_by(false, half),
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
+                if insert {
+                    self.input
+                        .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                let text = self.input.text().trim().to_string();
+                if text.is_empty() {
+                    return ChatAction::None;
+                }
+                self.input = CellEditor::new("");
+                self.input.enter_insert();
+                return ChatAction::Send(text);
+            }
+            KeyCode::Esc if self.input.at_rest() => return ChatAction::Blur,
+            KeyCode::Char('q') if plain && self.input.at_rest() => return ChatAction::Close,
+            _ => {
+                self.input.key(key);
+                // `:w`, `:q` and messages mean nothing for a prompt.
+                self.input.take_requests();
+            }
+        }
+        ChatAction::None
+    }
+
+    fn ensure_rows(&mut self, width: u16, theme: &Theme, tab: usize) {
+        if self.rows_width != width {
+            self.rows_width = width;
+            self.rows.iter_mut().for_each(|r| *r = None);
+        }
+        let w = width as usize;
+        for (item, slot) in self.items.iter().zip(self.rows.iter_mut()) {
+            if slot.is_none() {
+                *slot = Some(item_rows(item, w, theme, tab));
+            }
+        }
+    }
+}
+
+fn item_rows(item: &Item, w: usize, theme: &Theme, tab: usize) -> Vec<Row> {
+    let ui = &theme.ui;
+    let wrapped = |text: &str, st: Style, bar: bool| -> Vec<Row> {
+        let clean = clean_text(text);
+        clean
+            .split('\n')
+            .flat_map(|l| wrap_line(&Line::from(Span::styled(l.to_string(), st)), w, tab))
+            .map(|line| Row { line, bar })
+            .collect()
+    };
+    match item {
+        Item::User(t) => wrapped(t, Style::default().add_modifier(Modifier::BOLD), true),
+        Item::Assistant(t) => render_markdown(&clean_text(t), w as u16, tab)
+            .lines
+            .into_iter()
+            .map(|line| Row { line, bar: false })
+            .collect(),
+        Item::Tool {
+            name,
+            detail,
+            state,
+            ..
+        } => {
+            let mut spans = vec![
+                Span::styled("▸ ", theme.muted()),
+                Span::styled(clean_text(name).into_owned(), theme.muted()),
+            ];
+            if !detail.is_empty() {
+                spans.push(Span::styled(
+                    format!(" {}", clean_text(detail)),
+                    Style::default().fg(ui.line_numbers),
+                ));
+            }
+            match state {
+                ToolState::Running => spans.push(Span::styled("  …", theme.muted())),
+                ToolState::Done(n) => spans.push(Span::styled(
+                    format!("  ✓ {n}"),
+                    Style::default().fg(ui.success),
+                )),
+                ToolState::Failed(n) => spans.push(Span::styled(format!("  ✖ {n}"), theme.error())),
+            }
+            let line = Line::from(spans);
+            let line = if line.width() > w {
+                Line::from(Span::styled(cut(&line.to_string(), w), theme.muted()))
+            } else {
+                line
+            };
+            vec![Row { line, bar: false }]
+        }
+        Item::Notice { text, error } => {
+            let st = if *error {
+                theme.error()
+            } else {
+                theme.placeholder()
+            };
+            wrapped(text, st, false)
+        }
+    }
+}
+
+/// Draw the panel into `area`. Returns where the terminal cursor goes when
+/// the panel has the keys and its input is in insert mode.
+pub fn render(
+    buf: &mut Buffer,
+    area: Rect,
+    st: &mut ChatState,
+    theme: &Theme,
+    focused: bool,
+    tab: usize,
+) -> Option<Position> {
+    if area.width < 12 || area.height < 8 {
+        return None;
+    }
+    let ui = &theme.ui;
+    let float = theme.float();
+    buf.set_style(area, float);
+    let x = area.x + PAD_LEFT;
+    let w = area.width - PAD_LEFT - PAD_RIGHT;
+    let rule = Style::default().fg(ui.border);
+    let hrule =
+        |buf: &mut Buffer, y: u16| buf.set_string(area.x, y, "─".repeat(area.width as usize), rule);
+
+    // header
+    let title = if focused {
+        Style::default().fg(ui.focus)
+    } else {
+        theme.muted()
+    };
+    buf.set_string(
+        area.x + 2,
+        area.y,
+        "claude",
+        title.add_modifier(Modifier::BOLD),
+    );
+    let info = match (st.model.is_empty(), st.usage.is_empty()) {
+        (false, false) => format!("{} · {}", st.model, st.usage),
+        (false, true) => st.model.clone(),
+        _ => st.usage.clone(),
+    };
+    let info = cut(&info, area.width.saturating_sub(12) as usize);
+    let iw = Line::from(info.as_str()).width() as u16;
+    buf.set_string(
+        area.x + area.width - PAD_RIGHT - iw,
+        area.y,
+        &info,
+        theme.muted(),
+    );
+    hrule(buf, area.y + 1);
+
+    // footer: rule, chips, input, gap, hints
+    let total_rows = st.input.rows(w as usize, tab, true) as u16;
+    let input_rows = total_rows.clamp(1, MAX_INPUT_ROWS.min(area.height / 3).max(1));
+    let chip_rows = u16::from(!st.chips.is_empty());
+    let footer = 1 + chip_rows + input_rows + 2;
+    let foot_y = area.y + area.height - footer;
+    hrule(buf, foot_y);
+    if chip_rows == 1 {
+        let mut cx = x;
+        for chip in &st.chips {
+            let label = format!(" ▣ {} ", cut(chip, w.saturating_sub(4) as usize));
+            let lw = Line::from(label.as_str()).width() as u16;
+            if cx + lw > x + w {
+                break;
+            }
+            buf.set_string(cx, foot_y + 1, &label, Style::default().bg(ui.selection));
+            cx += lw + 1;
+        }
+    }
+    let input_y = foot_y + 1 + chip_rows;
+    let prompt = if focused {
+        Style::default().fg(ui.focus)
+    } else {
+        theme.muted()
+    };
+    buf.set_string(
+        area.x + 1,
+        input_y,
+        "❯",
+        prompt.add_modifier(Modifier::BOLD),
+    );
+    let cursor_row = st.input.cursor_visual_row(w as usize, tab, true) as u16;
+    let first = (cursor_row + 1)
+        .saturating_sub(input_rows)
+        .min(total_rows.saturating_sub(input_rows));
+    let opts = EditorOpts {
+        theme,
+        base: float,
+        ext: "md",
+        numbers: LineNumbers::None,
+        wrap: true,
+        tab,
+    };
+    let clip = Rect::new(area.x, input_y, area.width, input_rows);
+    let insert = matches!(st.input.mode(), VimMode::Insert | VimMode::Replace);
+    let cursor = draw_editor(
+        &mut st.input,
+        &opts,
+        x,
+        w,
+        total_rows,
+        clip,
+        -(first as i32),
+        buf,
+    );
+    if st.input.text().is_empty() && (insert || !focused) {
+        let hint = match st.chips.first() {
+            Some(c) => format!("ask about {}", c.split(" · ").next().unwrap_or(c)),
+            None => "ask claude".to_string(),
+        };
+        buf.set_string(x, input_y, cut(&hint, w as usize), theme.placeholder());
+    }
+    buf.set_string(
+        x,
+        area.y + area.height - 1,
+        cut(HINTS, w as usize),
+        Style::default().fg(ui.line_numbers),
+    );
+
+    // transcript
+    let top = area.y + 2;
+    let h = foot_y.saturating_sub(top) as usize;
+    st.view_rows = h.max(1);
+    st.ensure_rows(w, theme, tab);
+    if st.items.is_empty() {
+        let lines = wrap_line(
+            &Line::from(Span::styled(EMPTY, theme.placeholder())),
+            w as usize,
+            tab,
+        );
+        for (i, l) in lines.iter().enumerate().take(h.saturating_sub(1)) {
+            buf.set_line(x, top + 1 + i as u16, l, w);
+        }
+    } else {
+        let blank = Row {
+            line: Line::default(),
+            bar: false,
+        };
+        let mut all: Vec<&Row> = Vec::new();
+        let mut prev_tool = false;
+        for (item, rows) in st.items.iter().zip(&st.rows) {
+            let tool = matches!(item, Item::Tool { .. });
+            if !all.is_empty() && !(tool && prev_tool) {
+                all.push(&blank);
+            }
+            all.extend(rows.iter().flatten());
+            prev_tool = tool;
+        }
+        st.scroll = st.scroll.min(all.len().saturating_sub(h));
+        let start = all.len().saturating_sub(h + st.scroll);
+        // One spare row under the header when the transcript does not fill it.
+        let lead = usize::from(all.len() < h);
+        for (i, row) in all.iter().skip(start).take(h - lead).enumerate() {
+            let y = top + (i + lead) as u16;
+            if row.bar {
+                buf.set_string(area.x + 1, y, "┃", Style::default().fg(ui.mode_visual));
+            }
+            buf.set_line(x, y, &row.line, w);
+        }
+        if st.scroll > 0 {
+            let more = format!(" ↓ {} ", st.scroll);
+            buf.set_string(
+                area.x + area.width - 1 - more.chars().count() as u16,
+                foot_y,
+                &more,
+                theme.muted(),
+            );
+        }
+    }
+    if focused { cursor } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn typed(st: &mut ChatState, s: &str) {
+        for c in s.chars() {
+            assert_eq!(st.handle_key(key(KeyCode::Char(c))), ChatAction::None);
+        }
+    }
+
+    fn screen(st: &mut ChatState, w: u16, h: u16, focused: bool) -> String {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, st, &Theme::default(), focused, 4);
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn enter_sends_and_clears_the_input() {
+        let mut st = ChatState::new();
+        assert_eq!(st.handle_key(key(KeyCode::Enter)), ChatAction::None);
+        typed(&mut st, "why is DK2 low?");
+        assert_eq!(
+            st.handle_key(key(KeyCode::Enter)),
+            ChatAction::Send("why is DK2 low?".into())
+        );
+        assert_eq!(st.input.text(), "");
+        assert!(matches!(st.input.mode(), VimMode::Insert));
+    }
+
+    #[test]
+    fn alt_enter_adds_a_line() {
+        let mut st = ChatState::new();
+        typed(&mut st, "a");
+        st.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        typed(&mut st, "b");
+        assert_eq!(st.input.text(), "a\nb");
+    }
+
+    #[test]
+    fn esc_goes_to_normal_then_back_to_the_notebook() {
+        let mut st = ChatState::new();
+        typed(&mut st, "q");
+        assert_eq!(st.handle_key(key(KeyCode::Esc)), ChatAction::None);
+        assert_eq!(st.handle_key(key(KeyCode::Esc)), ChatAction::Blur);
+        assert_eq!(st.handle_key(key(KeyCode::Char('q'))), ChatAction::Close);
+        assert_eq!(
+            st.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+            ChatAction::Blur
+        );
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_only_a_running_turn() {
+        let mut st = ChatState::new();
+        let cc = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(st.handle_key(cc), ChatAction::None);
+        st.busy = true;
+        assert_eq!(st.handle_key(cc), ChatAction::Interrupt);
+    }
+
+    #[test]
+    fn deltas_extend_one_message_and_tools_update_in_place() {
+        let mut st = ChatState::new();
+        st.push_user("hi");
+        st.push_delta("DK2 has ");
+        st.push_delta("fewer trades.");
+        st.tool_start("t1", "read_cells", "6–7");
+        st.tool_end("t1", true, "0.4s");
+        st.push_delta("Done.");
+        assert_eq!(
+            st.items(),
+            &[
+                Item::User("hi".into()),
+                Item::Assistant("DK2 has fewer trades.".into()),
+                Item::Tool {
+                    id: "t1".into(),
+                    name: "read_cells".into(),
+                    detail: "6–7".into(),
+                    state: ToolState::Done("0.4s".into())
+                },
+                Item::Assistant("Done.".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn draws_header_transcript_chips_and_hints() {
+        let mut st = ChatState::new();
+        st.model = "fable".into();
+        st.usage = "12k".into();
+        st.chips.push("cell 7 · code · figure".into());
+        st.push_user("why is DK2 so much lower?");
+        st.push_delta("It has **fewer** trades.");
+        st.tool_start("t1", "run_cells", "8");
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.lines().next().unwrap().contains("claude"), "{s}");
+        assert!(s.contains("fable · 12k"), "{s}");
+        assert!(s.contains("┃ why is DK2 so much lower?"), "{s}");
+        assert!(s.contains("It has fewer trades."), "{s}");
+        assert!(s.contains("▸ run_cells 8  …"), "{s}");
+        assert!(s.contains("▣ cell 7 · code · figure"), "{s}");
+        assert!(s.contains("❯"), "{s}");
+        assert!(s.contains("ask about cell 7"), "{s}");
+        assert!(s.lines().last().unwrap().contains("⏎ send"), "{s}");
+    }
+
+    #[test]
+    fn long_transcripts_follow_the_newest_row_and_scroll_back() {
+        let mut st = ChatState::new();
+        for i in 0..40 {
+            st.notice(format!("line {i}"), false);
+        }
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.contains("line 39") && !s.contains("line 0\n"), "{s}");
+        st.handle_key(key(KeyCode::PageUp));
+        st.handle_key(key(KeyCode::PageUp));
+        st.handle_key(key(KeyCode::PageUp));
+        st.handle_key(key(KeyCode::PageUp));
+        st.handle_key(key(KeyCode::PageUp));
+        st.handle_key(key(KeyCode::PageUp));
+        st.handle_key(key(KeyCode::PageUp));
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.contains("line 0 ") && !s.contains("line 39"), "{s}");
+        assert!(s.contains("↓"), "{s}");
+    }
+
+    #[test]
+    fn docks_only_when_the_notebook_keeps_room() {
+        assert_eq!(docked_width(90), None);
+        assert_eq!(docked_width(100), Some(42));
+        assert_eq!(docked_width(300), Some(80));
+    }
+}
