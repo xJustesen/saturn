@@ -11,6 +11,7 @@
 //! the same way as `AiEvent::PermissionRequest`.
 
 pub mod client;
+pub mod context;
 pub mod proto;
 
 use std::path::PathBuf;

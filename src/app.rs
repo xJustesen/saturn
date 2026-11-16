@@ -25,7 +25,7 @@ use crate::vim::Request;
 use crate::files::projects::Project;
 use crate::files::{FileEntry, PickerPrefs};
 use crate::files::preview::{PreviewWorker, UiColors};
-use crate::ai::{AiCommand, AiEvent, AiHandle};
+use crate::ai::{AiCommand, AiConfig, AiEvent, AiHandle, Permission, TurnOutcome, context};
 use crate::kernel::{KernelCommand, KernelEvent, KernelHandle, KernelStatus, ReplyStatus, startup};
 use crate::keymap::{self, Key, KeyAction};
 use crate::notebook::undo::CellOp;
@@ -38,7 +38,7 @@ use crate::search::{self, Match, SearchInput, SearchState};
 use crate::ui;
 use crate::ui::cell::content_width;
 use crate::ui::cell_picker::{CellPickerState, PickerAction};
-use crate::ui::chat::{ChatAction, ChatState};
+use crate::ui::chat::{Answer, Ask, ChatAction, ChatState};
 use crate::ui::dashboard::{DashAction, DashItem, DashboardState};
 use crate::ui::diff::Proposal;
 use crate::ui::layout::LayoutCache;
@@ -134,8 +134,10 @@ pub struct App {
     pub clipboard: Vec<Cell>,
     pub flash: Option<Flash>,
     pub overlay: Option<Overlay>,
-    /// The assistant panel, while it is open.
+    /// The assistant's conversation, once the panel has been opened.
     pub chat: Option<ChatState>,
+    /// The assistant panel is showing.
+    pub chat_open: bool,
     pub focus: Focus,
     /// Id of the last proposed edit.
     next_proposal: u64,
@@ -208,6 +210,7 @@ impl App {
             flash: None,
             overlay: None,
             chat: None,
+            chat_open: false,
             focus: Focus::Notebook,
             next_proposal: 0,
             search: SearchState::default(),
@@ -352,16 +355,81 @@ impl App {
         }
     }
 
-    /// The assistant has no UI yet: its events only reach the log.
+    /// What the assistant's process says goes into the panel's transcript.
     fn on_ai(&mut self, ev: AiEvent) {
-        match &ev {
-            // Streamed text would drown the log.
-            AiEvent::TextDelta(text) => tracing::trace!("ai: +{} bytes", text.len()),
-            AiEvent::NotFound { .. } | AiEvent::NotLoggedIn | AiEvent::Died { .. } => {
-                tracing::warn!("ai: {ev:?}");
+        if !matches!(ev, AiEvent::TextDelta(_)) {
+            tracing::debug!("ai: {ev:?}");
+        }
+        let chat = self.chat.get_or_insert_with(ChatState::new);
+        match ev {
+            AiEvent::Ready { model, .. } => {
+                if let Some(m) = model {
+                    chat.model = short_model(&m);
+                }
+            }
+            AiEvent::TextDelta(text) => chat.push_delta(&text),
+            // What a subagent does stays inside its own tool row.
+            AiEvent::ToolStart { parent: Some(_), .. } => {}
+            AiEvent::ToolStart { id, name, input, .. } => {
+                let detail = tool_detail(&input, 60);
+                let name = name.strip_prefix("mcp__saturn__").unwrap_or(&name).to_string();
+                chat.tool_start(id, name, detail);
+            }
+            AiEvent::ToolResult { id, is_error, text, .. } => {
+                let note = if is_error { ui::text::cut(text.lines().next().unwrap_or(""), 40) } else { String::new() };
+                chat.tool_end(&id, !is_error, note);
+            }
+            AiEvent::PermissionRequest(r) => {
+                let title = r.title.clone().unwrap_or_else(|| r.tool_name.clone());
+                let mut detail = tool_detail(&r.input, 400);
+                if detail.is_empty() {
+                    detail = r.description.clone().or(r.blocked_path.clone()).unwrap_or_default();
+                }
+                chat.ask = Some(Ask { id: r.id, title, detail, remember: r.suggestions });
+                if !self.chat_has_keys() {
+                    self.flash("claude asks for permission (Ctrl+L)");
+                }
+            }
+            // Saturn offers the model no tools of its own yet.
+            AiEvent::ToolCall { id, name, .. } => {
+                if let Some(ai) = &self.ai {
+                    let content = vec![crate::ai::ToolContent::Text(format!("saturn has no tool named {name}"))];
+                    ai.send(AiCommand::ToolReply { id, content, is_error: true });
+                }
+            }
+            AiEvent::RequestCancelled { id } => {
+                if chat.ask.as_ref().is_some_and(|a| a.id == id) {
+                    chat.ask = None;
+                }
+            }
+            AiEvent::TurnDone { outcome, usage, .. } => {
+                chat.busy = false;
+                chat.ask = None;
+                if usage.context_tokens > 0 {
+                    chat.usage = tokens(usage.context_tokens);
+                }
+                match outcome {
+                    TurnOutcome::Completed => {}
+                    TurnOutcome::Interrupted => chat.notice("interrupted", false),
+                    TurnOutcome::Error(e) => chat.notice(e, true),
+                }
+            }
+            AiEvent::NotFound { command } => {
+                chat.notice(format!("`{command}` was not found. Install Claude Code, then run `claude` once to log in."), true);
+                chat.busy = false;
                 self.ai = None;
             }
-            _ => tracing::debug!("ai: {ev:?}"),
+            AiEvent::NotLoggedIn => {
+                chat.notice("Claude Code is not logged in. Run `claude` in a terminal and use /login.", true);
+                chat.busy = false;
+                self.ai = None;
+            }
+            AiEvent::Died { reason } => {
+                chat.notice(format!("claude stopped: {reason}"), true);
+                chat.busy = false;
+                chat.ask = None;
+                self.ai = None;
+            }
         }
     }
 
@@ -415,7 +483,10 @@ impl App {
                 self.on_kernel(ev);
                 self.dirty_ui = true;
             }
-            AppEvent::Ai(ev) => self.on_ai(ev),
+            AppEvent::Ai(ev) => {
+                self.on_ai(ev);
+                self.dirty_ui = true;
+            }
             AppEvent::ImageReady { hash, result } => {
                 self.images.set_result(hash, result);
                 // A frame of the popout's live figure changes no layout.
@@ -483,7 +554,7 @@ impl App {
                     .as_ref()
                     .map(|k| matches!(k.status, KernelStatus::Busy | KernelStatus::Starting | KernelStatus::Restarting))
                     .unwrap_or(false);
-                if busy {
+                if busy || self.chat.as_ref().is_some_and(|c| c.busy) {
                     self.spinner = self.spinner.wrapping_add(1);
                     self.dirty_ui = true;
                 }
@@ -667,25 +738,90 @@ impl App {
 
     /// The assistant panel is open on the notebook screen and has the keys.
     fn chat_has_keys(&self) -> bool {
-        self.focus == Focus::Chat && self.chat.is_some() && matches!(self.screen, Screen::Notebook)
+        self.focus == Focus::Chat && self.chat_open && self.chat.is_some() && matches!(self.screen, Screen::Notebook)
+    }
+
+    /// Start the assistant's `claude` process unless one is running. It
+    /// spends nothing until the first prompt, so the panel starts it early.
+    fn ensure_ai(&mut self) -> &AiHandle {
+        if !self.ai.as_ref().is_some_and(AiHandle::is_alive) {
+            let dir = self
+                .nb
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let mut cfg = AiConfig::new(crate::files::root::find_root(&dir).root);
+            cfg.system_prompt = Some(context::SYSTEM_PROMPT.to_string());
+            cfg.disallowed_tools = vec!["NotebookEdit".to_string()];
+            self.ai = Some(AiHandle::spawn(cfg, self.tx.clone()));
+        }
+        self.ai.as_ref().expect("just started")
     }
 
     fn on_chat_key(&mut self, key: KeyEvent) {
         let Some(chat) = &mut self.chat else { return };
         match chat.handle_key(key) {
-            ChatAction::None | ChatAction::Interrupt => {}
-            ChatAction::Send(text) => {
-                chat.push_user(text);
-                chat.notice("The assistant is not connected yet.", false);
+            ChatAction::None => {}
+            ChatAction::Send(prompt) => {
+                chat.push_user(prompt.clone());
+                chat.busy = true;
+                let plotly = &self.plotly;
+                let png = |fig: &serde_json::Value| {
+                    plotly.cached(crate::render::hash_bytes(fig.to_string().as_bytes())).map(|p| p.to_vec())
+                };
+                let (ctx, images) = context::focus_context(&self.nb, self.focused, &png);
+                let text = if ctx.is_empty() { prompt } else { format!("{ctx}\n\n{prompt}") };
+                self.ensure_ai().send(AiCommand::Send { text, images });
+            }
+            ChatAction::Interrupt => {
+                if let Some(ai) = &self.ai {
+                    ai.send(AiCommand::Interrupt);
+                }
+            }
+            ChatAction::Permission { ask, answer } => {
+                let decision = match answer {
+                    Answer::Once => Permission::allow(),
+                    Answer::Always => {
+                        // Remembered for this session only, not in the project's settings.
+                        let mut remember = ask.remember;
+                        for r in &mut remember {
+                            if let Some(o) = r.as_object_mut() {
+                                o.insert("destination".into(), "session".into());
+                            }
+                        }
+                        Permission::Allow { updated_input: None, remember }
+                    }
+                    Answer::Deny => Permission::deny("The user declined."),
+                };
+                if let Some(ai) = &self.ai {
+                    ai.send(AiCommand::PermissionReply { id: ask.id, decision });
+                }
             }
             ChatAction::Blur => self.focus = Focus::Notebook,
             ChatAction::Close => self.close_chat(),
         }
     }
 
+    /// Hide the panel; the conversation stays for the next time it opens.
     fn close_chat(&mut self) {
-        self.chat = None;
+        self.chat_open = false;
         self.focus = Focus::Notebook;
+    }
+
+    /// Forget the conversation and start the next prompt in a new session.
+    fn new_chat(&mut self) {
+        if let Some(ai) = self.ai.take() {
+            ai.send(AiCommand::Shutdown);
+        }
+        self.chat = Some(ChatState::new());
+        self.chat_open = true;
+        self.focus = Focus::Chat;
+        self.refresh_chat_chips();
+        self.ensure_ai();
     }
 
     /// What the next prompt is about: the focused cell.
@@ -1207,11 +1343,18 @@ impl App {
                     self.focus = Focus::Notebook;
                 } else {
                     self.chat.get_or_insert_with(ChatState::new);
+                    self.chat_open = true;
                     self.focus = Focus::Chat;
                     self.refresh_chat_chips();
+                    self.ensure_ai();
                 }
             }
             Command::CloseChat => self.close_chat(),
+            Command::NewChat => {
+                if matches!(self.screen, Screen::Notebook) {
+                    self.new_chat();
+                }
+            }
             Command::AcceptProposal => {
                 if self.settle_proposal(true).is_none() {
                     self.flash("no proposed edit on this cell");
@@ -2367,6 +2510,28 @@ fn reopen_after(kind: &ConfirmKind, yes: bool) -> Option<(PathBuf, PathBuf)> {
         ConfirmKind::OpenDiscard { path, reopen: Some(start) } if !yes => Some((start.clone(), path.clone())),
         _ => None,
     }
+}
+
+/// `claude-haiku-4-5-20251001` as `haiku-4-5`.
+fn short_model(model: &str) -> String {
+    let m = model.strip_prefix("claude-").unwrap_or(model);
+    match m.rsplit_once('-') {
+        Some((head, tail)) if tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()) => head.to_string(),
+        _ => m.to_string(),
+    }
+}
+
+/// `12345` tokens as `12k`.
+fn tokens(n: u64) -> String {
+    if n >= 1000 { format!("{}k", (n + 500) / 1000) } else { n.to_string() }
+}
+
+/// The argument that says most about a tool call, for the transcript.
+fn tool_detail(input: &serde_json::Value, max: usize) -> String {
+    const KEYS: [&str; 9] = ["command", "file_path", "pattern", "path", "url", "query", "description", "prompt", "skill"];
+    let text = KEYS.iter().find_map(|k| input.get(*k).and_then(|v| v.as_str())).unwrap_or("");
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    ui::text::cut(&one_line, max)
 }
 
 #[cfg(test)]

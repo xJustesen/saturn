@@ -86,7 +86,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// on the right; when both do not fit it takes the whole area while it has
 /// the keys and hides otherwise.
 fn split(app: &App, main: Rect) -> (Option<Rect>, Option<Rect>) {
-    if app.chat.is_none() || !matches!(app.screen, Screen::Notebook) {
+    if !app.chat_open || app.chat.is_none() || !matches!(app.screen, Screen::Notebook) {
         return (Some(main), None);
     }
     match chat::docked_width(main.width) {

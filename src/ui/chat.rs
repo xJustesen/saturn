@@ -13,7 +13,7 @@ use crate::editor::CellEditor;
 use crate::render::render_markdown;
 use crate::theme::Theme;
 use crate::ui::cell::{EditorOpts, draw_editor};
-use crate::ui::text::{clean_text, cut, wrap_line};
+use crate::ui::text::{clean_text, cut, wrap_line, wrap_words};
 use crate::vim::Mode as VimMode;
 
 /// Narrowest panel that is still usable.
@@ -57,9 +57,34 @@ pub enum Item {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The assistant asks whether a tool may run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ask {
+    pub id: String,
+    /// What wants to run ("Bash").
+    pub title: String,
+    /// With what ("rm -rf build").
+    pub detail: String,
+    /// What "always" passes back with the answer.
+    pub remember: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    Once,
+    /// Allow, and do not ask again in this session.
+    Always,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ChatAction {
     None,
+    /// The answer to the [`Ask`] that was showing.
+    Permission {
+        ask: Ask,
+        answer: Answer,
+    },
     /// Send this prompt.
     Send(String),
     /// Stop the turn that is running.
@@ -88,6 +113,8 @@ pub struct ChatState {
     scroll: usize,
     /// Transcript rows on screen, for paging.
     view_rows: usize,
+    /// A permission request waiting for an answer; it takes the keys.
+    pub ask: Option<Ask>,
     /// A turn is running.
     pub busy: bool,
     pub model: String,
@@ -113,6 +140,7 @@ impl ChatState {
             chips: Vec::new(),
             scroll: 0,
             view_rows: 1,
+            ask: None,
             busy: false,
             model: String::new(),
             usage: String::new(),
@@ -205,6 +233,20 @@ impl ChatState {
         let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let insert = matches!(self.input.mode(), VimMode::Insert | VimMode::Replace);
         let half = (self.view_rows / 2).max(1);
+        if self.ask.is_some() {
+            let answer = match key.code {
+                KeyCode::Char('l') if ctrl => return ChatAction::Blur,
+                KeyCode::Char('c') if ctrl => return ChatAction::Interrupt,
+                KeyCode::Char('y') | KeyCode::Enter => Answer::Once,
+                KeyCode::Char('a') => Answer::Always,
+                KeyCode::Char('n') | KeyCode::Esc => Answer::Deny,
+                _ => return ChatAction::None,
+            };
+            return match self.ask.take() {
+                Some(ask) => ChatAction::Permission { ask, answer },
+                None => ChatAction::None,
+            };
+        }
         match key.code {
             KeyCode::Char('l') if ctrl => return ChatAction::Blur,
             KeyCode::Char('c') if ctrl => {
@@ -268,15 +310,17 @@ fn item_rows(item: &Item, w: usize, theme: &Theme, tab: usize) -> Vec<Row> {
         let clean = clean_text(text);
         clean
             .split('\n')
-            .flat_map(|l| wrap_line(&Line::from(Span::styled(l.to_string(), st)), w, tab))
+            .flat_map(|l| wrap_words(&Line::from(Span::styled(l.to_string(), st)), w))
             .map(|line| Row { line, bar })
             .collect()
     };
     match item {
         Item::User(t) => wrapped(t, Style::default().add_modifier(Modifier::BOLD), true),
-        Item::Assistant(t) => render_markdown(&clean_text(t), w as u16, tab)
+        // Rendered unwrapped, then wrapped at words rather than characters.
+        Item::Assistant(t) => render_markdown(&clean_text(t), u16::MAX, tab)
             .lines
-            .into_iter()
+            .iter()
+            .flat_map(|l| wrap_words(l, w))
             .map(|line| Row { line, bar: false })
             .collect(),
         Item::Tool {
@@ -298,7 +342,7 @@ fn item_rows(item: &Item, w: usize, theme: &Theme, tab: usize) -> Vec<Row> {
             match state {
                 ToolState::Running => spans.push(Span::styled("  …", theme.muted())),
                 ToolState::Done(n) => spans.push(Span::styled(
-                    format!("  ✓ {n}"),
+                    format!("  ✓ {n}").trim_end().to_string(),
                     Style::default().fg(ui.success),
                 )),
                 ToolState::Failed(n) => spans.push(Span::styled(format!("  ✖ {n}"), theme.error())),
@@ -371,74 +415,116 @@ pub fn render(
     );
     hrule(buf, area.y + 1);
 
-    // footer: rule, chips, input, gap, hints
-    let total_rows = st.input.rows(w as usize, tab, true) as u16;
-    let input_rows = total_rows.clamp(1, MAX_INPUT_ROWS.min(area.height / 3).max(1));
-    let chip_rows = u16::from(!st.chips.is_empty());
-    let footer = 1 + chip_rows + input_rows + 2;
-    let foot_y = area.y + area.height - footer;
-    hrule(buf, foot_y);
-    if chip_rows == 1 {
-        let mut cx = x;
-        for chip in &st.chips {
-            let label = format!(" ▣ {} ", cut(chip, w.saturating_sub(4) as usize));
-            let lw = Line::from(label.as_str()).width() as u16;
-            if cx + lw > x + w {
-                break;
-            }
-            buf.set_string(cx, foot_y + 1, &label, Style::default().bg(ui.selection));
-            cx += lw + 1;
+    // footer: rule, then a permission request or chips, input, gap and hints
+    let mut cursor = None;
+    let foot_y;
+    if let Some(ask) = &st.ask {
+        let detail = wrap_line(
+            &Line::from(Span::styled(
+                clean_text(&ask.detail).into_owned(),
+                theme.muted(),
+            )),
+            w as usize,
+            tab,
+        );
+        let detail_rows = (detail.len() as u16).min(4);
+        foot_y = area.y + area.height - (1 + 1 + detail_rows + 2);
+        hrule(buf, foot_y);
+        let warn = Style::default().fg(ui.warning).add_modifier(Modifier::BOLD);
+        buf.set_string(area.x + 1, foot_y + 1, "?", warn);
+        buf.set_string(
+            x,
+            foot_y + 1,
+            cut(&format!("allow {}", clean_text(&ask.title)), w as usize),
+            warn,
+        );
+        for (i, l) in detail.iter().take(detail_rows as usize).enumerate() {
+            buf.set_line(x, foot_y + 2 + i as u16, l, w);
         }
-    }
-    let input_y = foot_y + 1 + chip_rows;
-    let prompt = if focused {
-        Style::default().fg(ui.focus)
-    } else {
-        theme.muted()
-    };
-    buf.set_string(
-        area.x + 1,
-        input_y,
-        "❯",
-        prompt.add_modifier(Modifier::BOLD),
-    );
-    let cursor_row = st.input.cursor_visual_row(w as usize, tab, true) as u16;
-    let first = (cursor_row + 1)
-        .saturating_sub(input_rows)
-        .min(total_rows.saturating_sub(input_rows));
-    let opts = EditorOpts {
-        theme,
-        base: float,
-        ext: "md",
-        numbers: LineNumbers::None,
-        wrap: true,
-        tab,
-    };
-    let clip = Rect::new(area.x, input_y, area.width, input_rows);
-    let insert = matches!(st.input.mode(), VimMode::Insert | VimMode::Replace);
-    let cursor = draw_editor(
-        &mut st.input,
-        &opts,
-        x,
-        w,
-        total_rows,
-        clip,
-        -(first as i32),
-        buf,
-    );
-    if st.input.text().is_empty() && (insert || !focused) {
-        let hint = match st.chips.first() {
-            Some(c) => format!("ask about {}", c.split(" · ").next().unwrap_or(c)),
-            None => "ask claude".to_string(),
+        let key = |s: &'static str| {
+            Span::styled(
+                s,
+                Style::default().fg(ui.focus).add_modifier(Modifier::BOLD),
+            )
         };
-        buf.set_string(x, input_y, cut(&hint, w as usize), theme.placeholder());
+        let dim = |s: &'static str| Span::styled(s, theme.muted());
+        let keys = Line::from(vec![
+            key("y"),
+            dim(" once   "),
+            key("a"),
+            dim(" always   "),
+            key("n"),
+            dim(" deny"),
+        ]);
+        buf.set_line(x, area.y + area.height - 1, &keys, w);
+    } else {
+        let total_rows = st.input.rows(w as usize, tab, true) as u16;
+        let input_rows = total_rows.clamp(1, MAX_INPUT_ROWS.min(area.height / 3).max(1));
+        let chip_rows = u16::from(!st.chips.is_empty());
+        foot_y = area.y + area.height - (1 + chip_rows + input_rows + 2);
+        hrule(buf, foot_y);
+        if chip_rows == 1 {
+            let mut cx = x;
+            for chip in &st.chips {
+                let label = format!(" ▣ {} ", cut(chip, w.saturating_sub(4) as usize));
+                let lw = Line::from(label.as_str()).width() as u16;
+                if cx + lw > x + w {
+                    break;
+                }
+                buf.set_string(cx, foot_y + 1, &label, Style::default().bg(ui.selection));
+                cx += lw + 1;
+            }
+        }
+        let input_y = foot_y + 1 + chip_rows;
+        let prompt = if focused {
+            Style::default().fg(ui.focus)
+        } else {
+            theme.muted()
+        };
+        buf.set_string(
+            area.x + 1,
+            input_y,
+            "❯",
+            prompt.add_modifier(Modifier::BOLD),
+        );
+        let cursor_row = st.input.cursor_visual_row(w as usize, tab, true) as u16;
+        let first = (cursor_row + 1)
+            .saturating_sub(input_rows)
+            .min(total_rows.saturating_sub(input_rows));
+        let opts = EditorOpts {
+            theme,
+            base: float,
+            ext: "md",
+            numbers: LineNumbers::None,
+            wrap: true,
+            tab,
+        };
+        let clip = Rect::new(area.x, input_y, area.width, input_rows);
+        let insert = matches!(st.input.mode(), VimMode::Insert | VimMode::Replace);
+        cursor = draw_editor(
+            &mut st.input,
+            &opts,
+            x,
+            w,
+            total_rows,
+            clip,
+            -(first as i32),
+            buf,
+        );
+        if st.input.text().is_empty() && (insert || !focused) {
+            let hint = match st.chips.first() {
+                Some(c) => format!("ask about {}", c.split(" · ").next().unwrap_or(c)),
+                None => "ask claude".to_string(),
+            };
+            buf.set_string(x, input_y, cut(&hint, w as usize), theme.placeholder());
+        }
+        buf.set_string(
+            x,
+            area.y + area.height - 1,
+            cut(HINTS, w as usize),
+            Style::default().fg(ui.line_numbers),
+        );
     }
-    buf.set_string(
-        x,
-        area.y + area.height - 1,
-        cut(HINTS, w as usize),
-        Style::default().fg(ui.line_numbers),
-    );
 
     // transcript
     let top = area.y + 2;
@@ -629,6 +715,58 @@ mod tests {
         let s = screen(&mut st, 44, 20, true);
         assert!(s.contains("line 0 ") && !s.contains("line 39"), "{s}");
         assert!(s.contains("↓"), "{s}");
+    }
+
+    #[test]
+    fn the_transcript_wraps_at_words() {
+        let mut st = ChatState::new();
+        st.push_delta("It streams a few chunks of markdown so the panel has something to draw.");
+        let s = screen(&mut st, 44, 20, true);
+        assert!(
+            s.contains("   It streams a few chunks of markdown so  "),
+            "{s}"
+        );
+        assert!(s.contains("   the panel has something to draw."), "{s}");
+    }
+
+    #[test]
+    fn a_permission_request_takes_the_keys() {
+        let mut st = ChatState::new();
+        let ask = Ask {
+            id: "p1".into(),
+            title: "Bash".into(),
+            detail: "rm -rf build".into(),
+            remember: Vec::new(),
+        };
+        st.ask = Some(ask.clone());
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.contains("? allow Bash"), "{s}");
+        assert!(s.contains("rm -rf build"), "{s}");
+        assert!(
+            s.lines()
+                .last()
+                .unwrap()
+                .contains("y once   a always   n deny"),
+            "{s}"
+        );
+        assert_eq!(st.handle_key(key(KeyCode::Char('x'))), ChatAction::None);
+        assert_eq!(st.input.text(), "");
+        assert_eq!(
+            st.handle_key(key(KeyCode::Char('a'))),
+            ChatAction::Permission {
+                ask: ask.clone(),
+                answer: Answer::Always
+            }
+        );
+        assert!(st.ask.is_none());
+        st.ask = Some(ask.clone());
+        assert_eq!(
+            st.handle_key(key(KeyCode::Esc)),
+            ChatAction::Permission {
+                ask,
+                answer: Answer::Deny
+            }
+        );
     }
 
     #[test]
