@@ -9,7 +9,7 @@ use ratatui::widgets::Widget;
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
 
 use crate::config::Config;
-use crate::editor::text_rows;
+use crate::editor::{CellEditor, text_rows};
 use crate::notebook::{Cell, CellKind, ExecState};
 use crate::render::image::{ImageState, ImageStore};
 use crate::render::plotly::PlotlySidecar;
@@ -26,6 +26,13 @@ pub fn content_width(width: u16) -> u16 {
     width.saturating_sub(GUTTER_W + BAR_W + RIGHT_PAD).max(1)
 }
 
+/// What the inline prompt shows beside the cell: the model it asks and the
+/// spinner's phase.
+pub struct PromptInfo<'a> {
+    pub model: &'a str,
+    pub spinner: usize,
+}
+
 pub struct CellCtx<'a> {
     pub cfg: &'a Config,
     pub theme: &'a Theme,
@@ -34,6 +41,7 @@ pub struct CellCtx<'a> {
     pub plotly: &'a mut PlotlySidecar,
     pub lang_ext: &'a str,
     pub line_numbers: bool,
+    pub prompt: PromptInfo<'a>,
 }
 
 fn digits(n: usize) -> usize {
@@ -48,11 +56,16 @@ pub fn measure(cell: &mut Cell, editing: bool, width: u16, ctx: &mut CellCtx) ->
     let cw = content_width(width);
     let tab = ctx.cfg.tab_width;
     let wrap = ctx.cfg.wrap;
-    let source_rows = match (&cell.editor, editing) {
-        (Some(ed), true) => {
+    let ext = if cell.kind == CellKind::Markdown { "md" } else { ctx.lang_ext };
+    if !editing && let Some(p) = &mut cell.proposal {
+        p.rebase(&cell.source);
+    }
+    let source_rows = match (&cell.editor, editing, &cell.proposal) {
+        (Some(ed), true, _) => {
             let g = editor_gutter(ed.line_count(), ctx.line_numbers);
             ed.rows((cw as usize).saturating_sub(g).max(1), tab, wrap) as u16
         }
+        (_, _, Some(p)) => p.rows(cw, ext, ctx.theme, tab),
         _ => match cell.kind {
             CellKind::Markdown => {
                 if cell.source.trim().is_empty() {
@@ -66,6 +79,8 @@ pub fn measure(cell: &mut Cell, editing: bool, width: u16, ctx: &mut CellCtx) ->
             CellKind::Code | CellKind::Raw => text_rows(&expand_tabs(&cell.source, tab), cw as usize, tab, wrap) as u16,
         },
     };
+    // The inline prompt sits under the source and counts as part of it.
+    let source_rows = source_rows + if cell.prompt.is_some() { crate::ui::inline_prompt::ROWS } else { 0 };
     let mut outputs = Vec::new();
     let mut collapsed_rows = 0;
     if cell.kind == CellKind::Code && !cell.outputs.is_empty() {
@@ -105,6 +120,86 @@ fn gutter_label(cell: &Cell, theme: &Theme) -> (String, Style) {
         CellKind::Markdown => (String::new(), Style::default()),
         CellKind::Raw => ("raw".to_string(), muted),
     }
+}
+
+/// How [`draw_editor`] draws an editor.
+pub struct EditorOpts<'a> {
+    pub theme: &'a Theme,
+    /// Text and background the editor sits on.
+    pub base: Style,
+    /// syntect file extension for highlighting.
+    pub ext: &'a str,
+    pub numbers: LineNumbers,
+    pub wrap: bool,
+    pub tab: usize,
+}
+
+/// Draw `ed` (`rows` visual rows of `cw` columns) at column `x`, its first
+/// row at `clip.y + top`; rows outside `clip` are skipped. Returns where the
+/// terminal cursor goes in insert mode, when that is visible.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_editor(
+    ed: &mut CellEditor,
+    o: &EditorOpts,
+    x: u16,
+    cw: u16,
+    rows: u16,
+    clip: Rect,
+    top: i32,
+    buf: &mut Buffer,
+) -> Option<Position> {
+    let theme = o.theme;
+    let height = clip.height as i32;
+    let mut cursor = None;
+    let mut scratch = Buffer::empty(Rect::new(0, 0, cw, rows));
+    // Insert mode uses the terminal's own cursor (a bar, see main.rs);
+    // the other vim modes keep edtui's block.
+    let insert = ed.state.mode == EditorMode::Insert;
+    let cursor_style = if insert { Style::default() } else { Style::default().add_modifier(Modifier::REVERSED) };
+    let ed_theme = EditorTheme::default()
+        .base(o.base)
+        .cursor_style(cursor_style)
+        .selection_style(Style::default().bg(theme.ui.selection))
+        .line_numbers_style(Style::default().fg(theme.ui.line_numbers))
+        .hide_status_line();
+    let mut search = Style::default().bg(theme.ui.search_bg);
+    if let Some(fg) = theme.ui.search_fg {
+        search = search.fg(fg);
+    }
+    ed.decorate(Style::default().bg(theme.ui.selection), search);
+    let mut view = EditorView::new(&mut ed.state).theme(ed_theme).wrap(o.wrap).tab_width(o.tab).line_numbers(o.numbers);
+    if let Some(syntax) = crate::syntax::by_extension(o.ext) {
+        let h = SyntaxHighlighter::with_sets(
+            theme.syntax.clone(),
+            edtui::THEME_SET.clone(),
+            syntax.clone(),
+            crate::syntax::SYNTAX_SET.clone(),
+        );
+        view = view.syntax_highlighter(Some(h));
+    }
+    view.render(scratch.area, &mut scratch);
+    if insert && let Some(p) = ed.state.cursor_screen_position() {
+        let dy = top + p.y as i32;
+        if p.x < cw && p.y < rows && dy >= 0 && dy < height {
+            cursor = Some(Position::new(x + p.x, clip.y + dy as u16));
+        }
+    }
+    for sy in 0..rows {
+        let dy = top + sy as i32;
+        if dy < 0 || dy >= height {
+            continue;
+        }
+        let y = clip.y + dy as u16;
+        for sx in 0..cw {
+            if let (Some(src), Some(dst)) = (scratch.cell((sx, sy)), buf.cell_mut((x + sx, y))) {
+                *dst = src.clone();
+                // edtui emits syntect colors as RGB; terminal colors
+                // travel through as markers (see theme::decode_rgb).
+                dst.set_fg(decode_color(dst.fg));
+            }
+        }
+    }
+    cursor
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,66 +266,21 @@ pub fn render(
     // source
     match (&mut cell.editor, editing) {
         (Some(ed), true) => {
-            let g = editor_gutter(ed.line_count(), ctx.line_numbers) as u16;
-            let mut scratch = Buffer::empty(Rect::new(0, 0, cw, layout.source_rows));
-            // Insert mode uses the terminal's own cursor (a bar, see main.rs);
-            // the other vim modes keep edtui's block.
-            let insert = ed.state.mode == EditorMode::Insert;
-            let cursor_style =
-                if insert { Style::default() } else { Style::default().add_modifier(Modifier::REVERSED) };
-            let ed_theme = EditorTheme::default()
-                .base(theme.base())
-                .cursor_style(cursor_style)
-                .selection_style(Style::default().bg(theme.ui.selection))
-                .line_numbers_style(Style::default().fg(theme.ui.line_numbers))
-                .hide_status_line();
-            let mut search = Style::default().bg(theme.ui.search_bg);
-            if let Some(fg) = theme.ui.search_fg {
-                search = search.fg(fg);
-            }
-            ed.decorate(Style::default().bg(theme.ui.selection), search);
             let numbers = match (ctx.line_numbers, ctx.cfg.relative_numbers) {
                 (false, _) => LineNumbers::None,
                 (true, true) => LineNumbers::Relative,
                 (true, false) => LineNumbers::Absolute,
             };
-            let mut view = EditorView::new(&mut ed.state)
-                .theme(ed_theme)
-                .wrap(wrap)
-                .tab_width(tab)
-                .line_numbers(numbers);
             let ext = if cell.kind == CellKind::Markdown { "md" } else { ctx.lang_ext };
-            if let Some(syntax) = crate::syntax::by_extension(ext) {
-                let h = SyntaxHighlighter::with_sets(
-                    theme.syntax.clone(),
-                    edtui::THEME_SET.clone(),
-                    syntax.clone(),
-                    crate::syntax::SYNTAX_SET.clone(),
-                );
-                view = view.syntax_highlighter(Some(h));
+            let opts = EditorOpts { theme, base: theme.base(), ext, numbers, wrap, tab };
+            if let Some(p) = draw_editor(ed, &opts, cx, cw, layout.source_rows, area, top, buf) {
+                cursor = Some(p);
             }
-            let _ = g;
-            view.render(scratch.area, &mut scratch);
-            if insert && let Some(p) = ed.state.cursor_screen_position() {
-                let dy = top + p.y as i32;
-                if p.x < cw && p.y < layout.source_rows && dy >= 0 && dy < height {
-                    cursor = Some(Position::new(cx + p.x, area.y + dy as u16));
-                }
-            }
-            for sy in 0..layout.source_rows {
-                let dy = top + sy as i32;
-                if dy < 0 || dy >= height {
-                    continue;
-                }
-                let y = area.y + dy as u16;
-                for x in 0..cw {
-                    if let (Some(src), Some(dst)) = (scratch.cell((x, sy)), buf.cell_mut((cx + x, y))) {
-                        *dst = src.clone();
-                        // edtui emits syntect colors as RGB; terminal colors
-                        // travel through as markers (see theme::decode_rgb).
-                        dst.set_fg(decode_color(dst.fg));
-                    }
-                }
+        }
+        _ if cell.proposal.is_some() => {
+            let ext = if cell.kind == CellKind::Markdown { "md" } else { ctx.lang_ext };
+            if let Some(p) = &cell.proposal {
+                crate::ui::diff::render(p, cx, cw, area, top, ext, theme, tab, buf);
             }
         }
         _ => {
@@ -261,6 +311,17 @@ pub fn render(
                     continue;
                 }
                 buf.set_line(cx, area.y + dy as u16, line, cw);
+            }
+        }
+    }
+
+    if let Some(p) = &cell.prompt {
+        let y = top + src_rows - crate::ui::inline_prompt::ROWS as i32;
+        // Drawn only when both rows are on screen: a clipped prompt cannot take input.
+        if y >= 0 && y + crate::ui::inline_prompt::ROWS as i32 <= height {
+            let rect = Rect::new(bar_x, area.y + y as u16, area.width.saturating_sub(GUTTER_W), crate::ui::inline_prompt::ROWS);
+            if let Some(pos) = crate::ui::inline_prompt::render(buf, rect, p, ctx.prompt.model, ctx.prompt.spinner, theme) {
+                cursor = Some(pos);
             }
         }
     }

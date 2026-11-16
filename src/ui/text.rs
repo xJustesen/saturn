@@ -94,6 +94,81 @@ pub fn wrap_line(line: &Line<'static>, max_width: usize, tab_width: usize) -> Ve
     rows
 }
 
+/// Wrap one styled line at spaces; only a word longer than a row is broken
+/// inside. Rows after the first keep the line's leading indent.
+pub fn wrap_words(line: &Line<'static>, max_width: usize) -> Vec<Line<'static>> {
+    if max_width == 0 || line.width() <= max_width {
+        return vec![line.clone()];
+    }
+    let width = |c: char| char_width(c, 1);
+    let cells: Vec<(char, Style)> = line.spans.iter().flat_map(|s| s.content.chars().map(move |c| (c, s.style))).collect();
+    let indent: Vec<(char, Style)> = cells.iter().take_while(|(c, _)| *c == ' ').take(max_width / 2).copied().collect();
+    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut row: Vec<(char, Style)> = Vec::new();
+    let mut w = 0;
+    // Index in `row` of the last space that follows a word.
+    let mut last_space: Option<usize> = None;
+    let mut has_word = false;
+    for (c, st) in cells {
+        if w + width(c) > max_width && has_word {
+            // A space that does not fit ends the row where it stands.
+            if c == ' ' {
+                rows.push(std::mem::replace(&mut row, indent.clone()));
+                w = indent.len();
+                last_space = None;
+                has_word = false;
+                continue;
+            }
+            let rest = match last_space {
+                Some(i) => {
+                    let rest = row.split_off(i + 1);
+                    row.pop();
+                    rest
+                }
+                None => Vec::new(),
+            };
+            rows.push(std::mem::replace(&mut row, indent.clone()));
+            has_word = !rest.is_empty();
+            row.extend(rest);
+            w = row.iter().map(|(c, _)| width(*c)).sum();
+            last_space = None;
+        }
+        if c == ' ' {
+            if has_word {
+                last_space = Some(row.len());
+            }
+        } else {
+            has_word = true;
+        }
+        row.push((c, st));
+        w += width(c);
+    }
+    rows.push(row);
+    rows.into_iter()
+        .map(|cells| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut cur: Option<(String, Style)> = None;
+            for (c, st) in cells {
+                match &mut cur {
+                    Some((s, style)) if *style == st => s.push(c),
+                    _ => {
+                        if let Some((s, style)) = cur.take() {
+                            spans.push(Span::styled(s, style));
+                        }
+                        cur = Some((c.to_string(), st));
+                    }
+                }
+            }
+            if let Some((s, style)) = cur {
+                spans.push(Span::styled(s, style));
+            }
+            let mut l = Line::from(spans);
+            l.style = line.style;
+            l
+        })
+        .collect()
+}
+
 pub fn wrap_text(text: Text<'static>, max_width: usize, tab_width: usize, wrap: bool) -> Text<'static> {
     if !wrap {
         return text;
@@ -305,6 +380,19 @@ pub fn cut_left(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_words_breaks_at_spaces_and_keeps_every_word_apart() {
+        let rows = |s: &str, w: usize| -> Vec<String> {
+            wrap_words(&Line::from(s.to_string()), w).iter().map(|l| l.to_string()).collect()
+        };
+        assert_eq!(rows("have numpy (and likely pandas) installed", 16), ["have numpy (and", "likely pandas)", "installed"]);
+        // The space that overflows a full row ends it; nothing is glued.
+        assert_eq!(rows("abcd efgh ijkl", 9), ["abcd efgh", "ijkl"]);
+        assert_eq!(rows("  - a long list item here", 12), ["  - a long", "  list item", "  here"]);
+        assert_eq!(rows("supercalifragilistic", 8), ["supercal", "ifragili", "stic"]);
+        assert_eq!(rows("short", 8), ["short"]);
+    }
 
     #[test]
     fn clean_text_removes_escape_sequences() {

@@ -55,6 +55,8 @@ const GLOBAL: &[(Key, Command)] = &[
     (ctrl('p'), Command::CommandPalette),
     (ctrl('o'), Command::OpenFile),
     (ctrl('q'), Command::Quit),
+    (ctrl('l'), Command::ToggleChat),
+    (ctrl('g'), Command::AskInline),
     (ctrl('c'), Command::InterruptKernel),
     (Key { code: KeyCode::Char('_'), mods: KeyModifiers::CONTROL }, Command::SplitCell),
     (Key { code: KeyCode::Char('-'), mods: KeyModifiers::CONTROL.union(KeyModifiers::SHIFT) }, Command::SplitCell),

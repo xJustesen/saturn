@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::app::{App, Mode, Screen};
+use crate::app::{App, Focus, Mode, Screen};
 use crate::kernel::KernelStatus;
 use crate::vim::Mode as VimMode;
 
@@ -36,6 +36,11 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     };
     let mode = |label: &'static str, bg: Color| (label, Style::default().bg(bg).fg(ui.mode_fg).add_modifier(Modifier::BOLD));
     let (mode_label, mode_style) = match app.mode {
+        _ if app.ask_cell.is_some() => mode(" ASK ", ui.mode_chat),
+        _ if app.focus == Focus::Chat && app.chat_open && app.chat.as_ref().is_some_and(|c| c.reading()) => {
+            mode(" READ ", ui.mode_normal)
+        }
+        _ if app.focus == Focus::Chat && app.chat_open => mode(" CHAT ", ui.mode_chat),
         Mode::Command if app.search.input.is_some() => mode(" SEARCH ", ui.mode_search),
         Mode::Command => mode(" COMMAND ", ui.mode_command),
         Mode::Edit => {
@@ -110,6 +115,18 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     }
 
     let mut right: Vec<Span> = Vec::new();
+    if let Some(c) = &app.chat {
+        if c.ask.is_some() {
+            right.push(Span::styled("claude asks   ", Style::default().fg(ui.warning)));
+        } else if c.busy {
+            right.push(Span::styled(format!("claude {}   ", SPINNER[app.spinner % SPINNER.len()]), Style::default().fg(ui.info)));
+        }
+    }
+    let proposals = app.nb.cells.iter().filter(|c| c.proposal.is_some()).count();
+    if proposals > 0 {
+        let s = if proposals == 1 { "" } else { "s" };
+        right.push(Span::styled(format!("± {proposals} proposal{s}   "), Style::default().fg(ui.warning)));
+    }
     match &app.kernel {
         Some(k) => {
             let (icon, st) = match k.status {

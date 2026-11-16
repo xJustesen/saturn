@@ -2,11 +2,14 @@
 
 pub mod cell;
 pub mod cell_picker;
+pub mod chat;
 pub mod dashboard;
+pub mod diff;
 pub mod dashboard_logo;
 pub mod file_picker;
 pub mod fuzzy;
 pub mod icons;
+pub mod inline_prompt;
 pub mod layout;
 pub mod notebook_view;
 pub mod overlay;
@@ -15,15 +18,16 @@ pub mod status_bar;
 pub mod text;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 
-use crate::app::{App, Screen};
+use crate::app::{App, Focus, Screen};
 use crate::ui::overlay::Overlay;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let [main, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    app.view = main;
+    let (nb_area, chat_area) = split(app, main);
+    app.view = nb_area.unwrap_or(main);
     app.edit_cursor = None;
     let buf = frame.buffer_mut();
     buf.set_style(area, app.theme.base());
@@ -59,11 +63,39 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         return;
     }
-    notebook_view::render(buf, main, app);
+    if let Some(a) = nb_area {
+        notebook_view::render(buf, a, app);
+    }
+    let mut chat_cursor = None;
+    let chat_focused = app.focus == Focus::Chat;
+    if let (Some(a), Some(c)) = (chat_area, &mut app.chat) {
+        chat_cursor = chat::render(buf, a, c, &app.theme, chat_focused, app.cfg.tab_width);
+    }
     status_bar::render(buf, status, app);
     if let Some(ov) = &mut app.overlay {
         overlay::render(buf, area, ov, &app.theme);
+    } else if chat_focused && chat_area.is_some() {
+        if let Some(pos) = chat_cursor {
+            frame.set_cursor_position(pos);
+        }
     } else if let Some(pos) = app.edit_cursor {
         frame.set_cursor_position(pos);
+    }
+}
+
+/// Where the notebook and the assistant panel go in `main`. The panel docks
+/// on the right; when both do not fit it takes the whole area while it has
+/// the keys and hides otherwise.
+fn split(app: &App, main: Rect) -> (Option<Rect>, Option<Rect>) {
+    if !app.chat_open || app.chat.is_none() || !matches!(app.screen, Screen::Notebook) {
+        return (Some(main), None);
+    }
+    match chat::docked_width(main.width) {
+        Some(w) => {
+            let [nb, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(w)]).areas(main);
+            (Some(nb), Some(panel))
+        }
+        None if app.focus == Focus::Chat => (None, Some(main)),
+        None => (Some(main), None),
     }
 }

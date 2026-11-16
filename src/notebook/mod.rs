@@ -111,6 +111,10 @@ pub struct Cell {
     pub outputs_expanded: bool,
     /// A `clear_output(wait=True)` is pending: clear before the next output.
     pub clear_pending: bool,
+    /// An edit the assistant proposes, shown as a diff until it is settled.
+    pub proposal: Option<crate::ui::diff::Proposal>,
+    /// The inline prompt to the assistant, while it is open on this cell.
+    pub prompt: Option<crate::ui::inline_prompt::InlinePrompt>,
 }
 
 impl Clone for Cell {
@@ -128,6 +132,8 @@ impl Clone for Cell {
             outputs_collapsed: self.outputs_collapsed,
             outputs_expanded: self.outputs_expanded,
             clear_pending: false,
+            proposal: None,
+            prompt: None,
         }
     }
 }
@@ -158,6 +164,8 @@ impl Cell {
             outputs_collapsed: false,
             outputs_expanded: false,
             clear_pending: false,
+            proposal: None,
+            prompt: None,
         }
     }
 
@@ -219,6 +227,8 @@ impl Cell {
                 outputs_collapsed: false,
                 outputs_expanded: false,
                 clear_pending: false,
+            proposal: None,
+            prompt: None,
             },
             v4::Cell::Markdown { id, metadata, source, attachments } => Cell {
                 id,
@@ -233,6 +243,8 @@ impl Cell {
                 outputs_collapsed: false,
                 outputs_expanded: false,
                 clear_pending: false,
+            proposal: None,
+            prompt: None,
             },
             v4::Cell::Raw { id, metadata, source } => Cell {
                 id,
@@ -247,6 +259,8 @@ impl Cell {
                 outputs_collapsed: false,
                 outputs_expanded: false,
                 clear_pending: false,
+            proposal: None,
+            prompt: None,
             },
         }
     }

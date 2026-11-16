@@ -28,6 +28,7 @@ editing inside cells, Jupyter-style commands around them, and your figures inlin
 - ⌨️ Vim editing inside cells, Jupyter-style commands around them
 - 📊 Inline matplotlib and plotly figures (Kitty graphics, iTerm2, Sixel, or halfblocks in tmux)
 - 🖱️ Interactive plotly figures in the `z` output popout
+- 🤖 Built-in Claude assistant on your Claude Code login: chat about a cell or its output, review edits as inline diffs
 - 🔍 Command palette, fuzzy file picker with preview, kernel picker
 - 🎨 Twelve built-in themes, or import your Neovim colorscheme
 
@@ -40,6 +41,7 @@ editing inside cells, Jupyter-style commands around them, and your figures inlin
 - [`uv`](https://docs.astral.sh/uv/) and **Chrome** to render plotly figures that carry no PNG
   **_(optional)_**
 - A [Nerd Font](https://www.nerdfonts.com/) for icons **_(optional)_**
+- [Claude Code](https://claude.com/claude-code) 2.1.314 or newer, logged in, for the assistant **_(optional)_**
 
 ## 🚀 Getting Started
 
@@ -77,6 +79,31 @@ Press `?` in saturn for the full list. The essentials:
 | `/` | search | `Ctrl+O` | open file |
 | `z` | output popout | `Ctrl+P` | command palette |
 | `u` / `Ctrl+R` | undo / redo | `Ctrl+S` / `q` | save / quit |
+| `Ctrl+L` | assistant panel | `Ctrl+G` | ask for a change to this cell |
+
+## 🤖 Assistant
+
+saturn runs your own `claude` CLI in the background, so the assistant uses your Claude subscription
+login: no API key, and saturn never sees your credentials.
+
+- **`Ctrl+L`** opens a chat panel beside the notebook. Each prompt carries the focused cell, its
+  outputs and its figures, so "why is this plot empty?" works as asked. `Ctrl+L` again closes the
+  panel (the conversation is kept); `Esc` goes back to the notebook and leaves it open.
+- **Long replies** rest on your question, so you read them from the top; a marker shows how much
+  is below. `Esc` in the panel is a reading mode: `j`/`k`, `Ctrl+D`/`Ctrl+U` and `gg`/`G` scroll,
+  `i` goes back to typing, `Esc` again returns to the notebook.
+- **`Ctrl+G`** opens a one-line prompt under the cell for a quick edit, answered by a fast model.
+- **Changes are proposals.** An edit, a new cell or a deletion shows in the notebook as a diff:
+  `Tab` accepts (one undo step), `X` rejects, `Enter` accepts and opens the cell.
+- **It is the full Claude Code agent.** Besides the notebook it can read, search and edit the
+  project and run commands; anything that needs permission asks in the panel (`y` once, `a` for
+  the session, `n` deny). Running cells asks too.
+- **Model and effort** switch from `Ctrl+P`: "Assistant: select model…" changes the panel's model
+  in place, "Assistant: select effort…" restarts its process and resumes the conversation. Both are
+  saved to `config.toml` and show in the panel's header.
+- `Ctrl+P` also has "Assistant: explain this output", "fix this error" and "new chat".
+
+The panel's process starts in the notebook's git root, so the project's `CLAUDE.md` applies.
 
 ## ⚙️ Configuration
 
@@ -92,6 +119,15 @@ wrap = true
 max_image_rows = 20
 stream_max_lines = 500
 icons = true          # needs a Nerd Font
+
+[assistant]
+enabled = true
+command = "claude"
+model = ""            # the panel's model (fable, opus, sonnet, haiku); empty is your account's default
+inline_model = "haiku"  # the model behind Ctrl+G
+effort = ""           # low, medium, high, xhigh or max; empty is the CLI's default
+user_mcp = false      # also load the MCP servers set up for Claude Code
+use_api_key = false   # true bills ANTHROPIC_API_KEY instead of the subscription
 ```
 
 An invalid value makes saturn ignore the file; the log says why.

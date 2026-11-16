@@ -25,10 +25,11 @@ use crate::vim::Request;
 use crate::files::projects::Project;
 use crate::files::{FileEntry, PickerPrefs};
 use crate::files::preview::{PreviewWorker, UiColors};
+use crate::ai::{AiCommand, AiConfig, AiEvent, AiHandle, Image, Permission, ToolContent, TurnOutcome, context, tools};
 use crate::kernel::{KernelCommand, KernelEvent, KernelHandle, KernelStatus, ReplyStatus, startup};
 use crate::keymap::{self, Key, KeyAction};
 use crate::notebook::undo::CellOp;
-use crate::notebook::{Cell, CellKind, ExecState, Notebook, Output, io as nbio};
+use crate::notebook::{Cell, CellId, CellKind, ExecState, Notebook, Output, io as nbio};
 use crate::render::RenderCache;
 use crate::render::image::ImageStore;
 use crate::render::plotly::PlotlySidecar;
@@ -37,7 +38,10 @@ use crate::search::{self, Match, SearchInput, SearchState};
 use crate::ui;
 use crate::ui::cell::content_width;
 use crate::ui::cell_picker::{CellPickerState, PickerAction};
+use crate::ui::chat::{Answer, Ask, ChatAction, ChatState};
 use crate::ui::dashboard::{DashAction, DashItem, DashboardState};
+use crate::ui::inline_prompt::{InlinePrompt, PromptAction};
+use crate::ui::diff::{Kind as ProposalKind, Proposal};
 use crate::ui::layout::LayoutCache;
 use crate::ui::file_picker::{FileAction, FilePickerState, PickerCtx, ThreadIo};
 use crate::ui::overlay::{
@@ -49,6 +53,10 @@ use crate::ui::popout::{PopoutAction, PopoutState};
 pub enum AppEvent {
     Terminal(Event),
     Kernel(KernelEvent),
+    /// From the assistant's `claude` process.
+    Ai(AiEvent),
+    /// From the lean `claude` process behind the inline prompt.
+    AiQuick(AiEvent),
     ImageReady { hash: u64, result: Result<SlicedProtocol, String> },
     PlotlyDone { hash: u64, result: Result<Vec<u8>, String> },
     PlotlyFatal(String),
@@ -84,6 +92,34 @@ pub enum Mode {
     Edit,
 }
 
+/// Which of the two assistant processes something belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    /// The panel's conversation.
+    Chat,
+    /// The inline prompt.
+    Quick,
+}
+
+/// A tool call of the assistant that is answered later.
+enum ToolWait {
+    /// When the user settles this proposal.
+    Proposal { lane: Lane, tool: String, proposal: u64 },
+    /// When these cells have run.
+    Run { lane: Lane, tool: String, cells: Vec<CellId> },
+}
+
+/// What a disabled assistant answers its keys with.
+const ASSISTANT_OFF: &str = "the assistant is off: set enabled = true under [assistant] in config.toml";
+
+/// Which pane of the notebook screen has the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Notebook,
+    /// The assistant panel.
+    Chat,
+}
+
 /// What sits under the overlays: the start dashboard or the notebook.
 pub enum Screen {
     Dashboard(DashboardState),
@@ -110,6 +146,26 @@ pub struct App {
     pub images: ImageStore,
     pub plotly: PlotlySidecar,
     pub kernel: Option<KernelHandle>,
+    /// The assistant's `claude` process, once something has started it.
+    pub ai: Option<AiHandle>,
+    /// The panel conversation's session id.
+    ai_session: Option<String>,
+    /// A turn has finished in that session, so there is something on disk
+    /// for a restarted process to resume.
+    ai_has_turn: bool,
+    /// The session the next panel process continues.
+    ai_resume: Option<String>,
+    /// Restart the panel's process when the running turn ends (a setting
+    /// that only applies at start changed).
+    ai_restart: bool,
+    /// The lean `claude` process behind the inline prompt.
+    quick: Option<AiHandle>,
+    /// What that process has said in the turn that is running.
+    quick_text: String,
+    /// "claude · haiku", for the inline prompt.
+    pub quick_label: String,
+    /// The cell whose inline prompt has the keys.
+    pub ask_cell: Option<CellId>,
     pub kernelspecs: Option<Vec<KernelspecDir>>,
     pub cfg: Config,
     pub theme: Theme,
@@ -119,6 +175,17 @@ pub struct App {
     pub clipboard: Vec<Cell>,
     pub flash: Option<Flash>,
     pub overlay: Option<Overlay>,
+    /// The assistant's conversation, once the panel has been opened.
+    pub chat: Option<ChatState>,
+    /// The assistant panel is showing.
+    pub chat_open: bool,
+    pub focus: Focus,
+    /// Id of the last proposed edit.
+    next_proposal: u64,
+    /// The assistant's tool calls that wait on the user or the kernel.
+    ai_waits: Vec<ToolWait>,
+    /// The keys go back to the panel once the proposals it made are settled.
+    return_to_chat: bool,
     pub search: SearchState,
     pub lang_ext: String,
     pub line_numbers: bool,
@@ -175,6 +242,15 @@ impl App {
             images,
             plotly,
             kernel: None,
+            ai: None,
+            ai_session: None,
+            ai_has_turn: false,
+            ai_resume: None,
+            ai_restart: false,
+            quick: None,
+            quick_text: String::new(),
+            quick_label: format!("claude · {}", cfg.assistant.inline_model),
+            ask_cell: None,
             kernelspecs: None,
             line_numbers: cfg.line_numbers,
             picker_prefs: PickerPrefs { show_hidden: cfg.show_hidden, show_ignored: cfg.show_ignored },
@@ -186,6 +262,12 @@ impl App {
             clipboard: Vec::new(),
             flash: None,
             overlay: None,
+            chat: None,
+            chat_open: false,
+            focus: Focus::Notebook,
+            next_proposal: 0,
+            ai_waits: Vec::new(),
+            return_to_chat: false,
             search: SearchState::default(),
             lang_ext: "py".to_string(),
             view: Rect::default(),
@@ -304,6 +386,10 @@ impl App {
             k.send(KernelCommand::Shutdown);
             let _ = tokio::time::timeout(Duration::from_secs(3), k.wait()).await;
         }
+        if let Some(ai) = self.ai.take() {
+            ai.send(AiCommand::Shutdown);
+            let _ = tokio::time::timeout(Duration::from_secs(2), ai.wait()).await;
+        }
         Ok(())
     }
 
@@ -320,6 +406,92 @@ impl App {
             let _ = crossterm::execute!(out, EnableMouseCapture);
             if self.pixel_mouse {
                 let _ = crossterm::execute!(out, Print(PIXEL_MOUSE_ON));
+            }
+        }
+    }
+
+    /// What the assistant's process says goes into the panel's transcript.
+    fn on_ai(&mut self, ev: AiEvent) {
+        if !matches!(ev, AiEvent::TextDelta(_)) {
+            tracing::debug!("ai: {ev:?}");
+        }
+        let chat = self.chat.get_or_insert_with(ChatState::new);
+        match ev {
+            AiEvent::Ready { model, session_id, .. } => {
+                if let Some(m) = model {
+                    chat.model = short_model(&m);
+                }
+                self.ai_session = Some(session_id);
+            }
+            AiEvent::TextDelta(text) => chat.push_delta(&text),
+            // What a subagent does stays inside its own tool row.
+            AiEvent::ToolStart { parent: Some(_), .. } => {}
+            // Looking up a tool's schema is plumbing, not something the model does for the user.
+            AiEvent::ToolStart { name, .. } if name == "ToolSearch" => {}
+            AiEvent::ToolStart { id, name, input, .. } => {
+                let detail = tool_detail(&input, 60);
+                let name = name.strip_prefix("mcp__saturn__").unwrap_or(&name).to_string();
+                chat.tool_start(id, name, detail);
+            }
+            AiEvent::ToolResult { id, is_error, text, .. } => {
+                let note = if is_error { ui::text::cut(text.lines().next().unwrap_or(""), 40) } else { String::new() };
+                chat.tool_end(&id, !is_error, note);
+            }
+            AiEvent::PermissionRequest(r) => {
+                let title = r.title.clone().unwrap_or_else(|| r.tool_name.clone());
+                let mut detail = tool_detail(&r.input, 400);
+                if detail.is_empty() {
+                    detail = r.description.clone().or(r.blocked_path.clone()).unwrap_or_default();
+                }
+                chat.ask = Some(Ask { id: r.id, title, detail, remember: r.suggestions });
+                if !self.chat_has_keys() {
+                    self.flash("claude asks for permission (Ctrl+L)");
+                }
+            }
+            AiEvent::ToolCall { id, name, arguments, .. } => match self.run_tool(Lane::Chat, &id, &name, &arguments) {
+                Ok(Some((text, images))) => self.tool_reply(Lane::Chat, id, text, images, false),
+                // Answered when the user or the kernel is done.
+                Ok(None) => {}
+                Err(e) => self.tool_reply(Lane::Chat, id, e, Vec::new(), true),
+            },
+            AiEvent::RequestCancelled { id } => {
+                if chat.ask.as_ref().is_some_and(|a| a.id == id) {
+                    chat.ask = None;
+                }
+                self.cancel_wait(&id);
+            }
+            AiEvent::TurnDone { outcome, usage, .. } => {
+                chat.busy = false;
+                chat.ask = None;
+                if usage.context_tokens > 0 {
+                    chat.usage = tokens(usage.context_tokens);
+                }
+                self.ai_has_turn = true;
+                if std::mem::take(&mut self.ai_restart) {
+                    self.restart_ai();
+                }
+                let Some(chat) = &mut self.chat else { return };
+                match outcome {
+                    TurnOutcome::Completed => {}
+                    TurnOutcome::Interrupted => chat.notice("interrupted", false),
+                    TurnOutcome::Error(e) => chat.notice(e, true),
+                }
+            }
+            AiEvent::NotFound { command } => {
+                chat.notice(format!("`{command}` was not found. Install Claude Code, then run `claude` once to log in."), true);
+                chat.busy = false;
+                self.ai = None;
+            }
+            AiEvent::NotLoggedIn => {
+                chat.notice("Claude Code is not logged in. Run `claude` in a terminal and use /login.", true);
+                chat.busy = false;
+                self.ai = None;
+            }
+            AiEvent::Died { reason } => {
+                chat.notice(format!("claude stopped: {reason}"), true);
+                chat.busy = false;
+                chat.ask = None;
+                self.ai = None;
             }
         }
     }
@@ -343,10 +515,20 @@ impl App {
             },
             AppEvent::Terminal(Event::Key(key)) => {
                 self.on_key(key);
+                self.sweep_proposals();
+                self.refresh_chat_chips();
                 self.dirty_ui = true;
             }
             AppEvent::Terminal(Event::Paste(text)) => {
-                if self.mode == Mode::Edit {
+                if self.overlay.is_none() && self.ask_cell.is_some() {
+                    if let Some(p) = self.inline_prompt_mut() {
+                        p.paste(&text);
+                    }
+                } else if self.overlay.is_none() && self.chat_has_keys() {
+                    if let Some(c) = &mut self.chat {
+                        c.paste(text);
+                    }
+                } else if self.mode == Mode::Edit {
                     let idx = self.focused;
                     if let Some(ed) = self.nb.cells.get_mut(idx).and_then(|c| c.editor.as_mut()) {
                         ed.paste(text);
@@ -367,6 +549,15 @@ impl App {
             AppEvent::Terminal(_) => {}
             AppEvent::Kernel(ev) => {
                 self.on_kernel(ev);
+                self.check_runs();
+                self.dirty_ui = true;
+            }
+            AppEvent::Ai(ev) => {
+                self.on_ai(ev);
+                self.dirty_ui = true;
+            }
+            AppEvent::AiQuick(ev) => {
+                self.on_ai_quick(ev);
                 self.dirty_ui = true;
             }
             AppEvent::ImageReady { hash, result } => {
@@ -436,7 +627,7 @@ impl App {
                     .as_ref()
                     .map(|k| matches!(k.status, KernelStatus::Busy | KernelStatus::Starting | KernelStatus::Restarting))
                     .unwrap_or(false);
-                if busy {
+                if busy || self.ask_cell.is_some() || self.chat.as_ref().is_some_and(|c| c.busy) {
                     self.spinner = self.spinner.wrapping_add(1);
                     self.dirty_ui = true;
                 }
@@ -477,7 +668,8 @@ impl App {
         let editing = self.mode == Mode::Edit;
         let focused = self.focused;
         let App { nb, layout, cache, images, plotly, cfg, theme, lang_ext, line_numbers, .. } = self;
-        let mut ctx = ui::cell::CellCtx { cfg, theme, cache, images, plotly, lang_ext, line_numbers: *line_numbers };
+        let prompt = ui::cell::PromptInfo { model: "", spinner: 0 };
+        let mut ctx = ui::cell::CellCtx { cfg, theme, cache, images, plotly, lang_ext, line_numbers: *line_numbers, prompt };
         layout.ensure(n, |i| ui::cell::measure(&mut nb.cells[i], editing && i == focused, width, &mut ctx));
     }
 
@@ -577,6 +769,20 @@ impl App {
             self.on_dash(action);
             return;
         }
+        if self.ask_cell.is_some() {
+            self.on_inline_key(key);
+            return;
+        }
+        if self.chat_has_keys() {
+            // Saving, the palette, the files picker and quitting stay global.
+            match keymap::global(&key) {
+                Some(cmd @ (Command::Save | Command::CommandPalette | Command::OpenFile | Command::Quit)) => {
+                    self.dispatch(cmd)
+                }
+                _ => self.on_chat_key(key),
+            }
+            return;
+        }
         if self.search.input.is_some() {
             self.on_search_key(key);
             return;
@@ -584,6 +790,9 @@ impl App {
         if let Some(cmd) = keymap::global(&key) {
             self.pending.clear();
             self.dispatch(cmd);
+            return;
+        }
+        if self.mode == Mode::Command && self.pending.is_empty() && self.on_proposal_key(&key) {
             return;
         }
         match self.mode {
@@ -600,6 +809,741 @@ impl App {
                     }
                 }
             },
+        }
+    }
+
+    // ----- assistant panel -----------------------------------------------------
+
+    /// The assistant panel is open on the notebook screen and has the keys.
+    fn chat_has_keys(&self) -> bool {
+        self.focus == Focus::Chat && self.chat_open && self.chat.is_some() && matches!(self.screen, Screen::Notebook)
+    }
+
+    /// Where the assistant works: the project root of the notebook.
+    fn ai_dir(&self) -> PathBuf {
+        let dir = self
+            .nb
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        crate::files::root::find_root(&dir).root
+    }
+
+    /// How either assistant process is started, from the `[assistant]` config.
+    fn ai_config(&self) -> AiConfig {
+        let a = &self.cfg.assistant;
+        let mut cfg = AiConfig::new(self.ai_dir());
+        cfg.command = a.command.clone();
+        cfg.user_mcp = a.user_mcp;
+        cfg.use_api_key = a.use_api_key;
+        cfg
+    }
+
+    /// Start the assistant's `claude` process unless one is running. It
+    /// spends nothing until the first prompt, so the panel starts it early.
+    fn ensure_ai(&mut self) -> &AiHandle {
+        if !self.ai.as_ref().is_some_and(AiHandle::is_alive) {
+            let mut cfg = self.ai_config();
+            cfg.model = Some(self.cfg.assistant.model.clone()).filter(|m| !m.is_empty());
+            cfg.effort = Some(self.cfg.assistant.effort.clone()).filter(|e| !e.is_empty());
+            cfg.resume = self.ai_resume.take();
+            cfg.system_prompt = Some(context::SYSTEM_PROMPT.to_string());
+            cfg.disallowed_tools = vec!["NotebookEdit".to_string()];
+            cfg.tools = tools::specs();
+            cfg.allowed_tools = tools::allowed();
+            self.ai = Some(AiHandle::spawn(cfg, self.tx.clone()));
+        }
+        self.ai.as_ref().expect("just started")
+    }
+
+    fn on_chat_key(&mut self, key: KeyEvent) {
+        let Some(chat) = &mut self.chat else { return };
+        match chat.handle_key(key) {
+            ChatAction::None => {}
+            ChatAction::Send(prompt) => self.send_chat(prompt),
+            ChatAction::Interrupt => {
+                if let Some(ai) = &self.ai {
+                    ai.send(AiCommand::Interrupt);
+                }
+            }
+            ChatAction::Permission { ask, answer } => {
+                let decision = match answer {
+                    Answer::Once => Permission::allow(),
+                    Answer::Always => {
+                        // Remembered for this session only, not in the project's settings.
+                        let mut remember = ask.remember;
+                        for r in &mut remember {
+                            if let Some(o) = r.as_object_mut() {
+                                o.insert("destination".into(), "session".into());
+                            }
+                        }
+                        Permission::Allow { updated_input: None, remember }
+                    }
+                    Answer::Deny => Permission::deny("The user declined."),
+                };
+                if let Some(ai) = &self.ai {
+                    ai.send(AiCommand::PermissionReply { id: ask.id, decision });
+                }
+            }
+            ChatAction::Blur => self.focus = Focus::Notebook,
+            ChatAction::Close => self.close_chat(),
+        }
+    }
+
+    /// Send `prompt` to the panel's conversation, with the focused cell as
+    /// what it is about.
+    fn send_chat(&mut self, prompt: String) {
+        let chat = self.chat.get_or_insert_with(ChatState::new);
+        chat.push_user(prompt.clone());
+        chat.busy = true;
+        let plotly = &self.plotly;
+        let png = |fig: &serde_json::Value| {
+            plotly.cached(crate::render::hash_bytes(fig.to_string().as_bytes())).map(|p| p.to_vec())
+        };
+        let (ctx, images) = context::focus_context(&self.nb, self.focused, &png);
+        let text = if ctx.is_empty() { prompt } else { format!("{ctx}\n\n{prompt}") };
+        self.ensure_ai().send(AiCommand::Send { text, images });
+    }
+
+    /// Open the panel and ask `prompt` about the focused cell right away.
+    fn ask_chat(&mut self, prompt: &str) {
+        if !matches!(self.screen, Screen::Notebook) {
+            return;
+        }
+        if !self.cfg.assistant.enabled {
+            self.flash(ASSISTANT_OFF);
+            return;
+        }
+        if self.mode == Mode::Edit {
+            self.leave_edit();
+        }
+        self.chat.get_or_insert_with(ChatState::new);
+        self.chat_open = true;
+        self.focus = Focus::Chat;
+        self.refresh_chat_chips();
+        self.send_chat(prompt.to_string());
+    }
+
+    /// Hide the panel; the conversation stays for the next time it opens.
+    fn close_chat(&mut self) {
+        self.chat_open = false;
+        self.focus = Focus::Notebook;
+    }
+
+    /// Forget the conversation and start the next prompt in a new session.
+    fn new_chat(&mut self) {
+        if let Some(ai) = self.ai.take() {
+            ai.send(AiCommand::Shutdown);
+        }
+        self.ai_session = None;
+        self.ai_has_turn = false;
+        self.ai_resume = None;
+        self.ai_restart = false;
+        self.chat = Some(ChatState::new());
+        self.chat_open = true;
+        self.focus = Focus::Chat;
+        self.refresh_chat_chips();
+        self.ensure_ai();
+    }
+
+    /// Start the panel's process again so a start-up setting applies; the
+    /// conversation carries on in the new process.
+    fn restart_ai(&mut self) {
+        if let Some(ai) = self.ai.take() {
+            ai.send(AiCommand::Shutdown);
+        }
+        self.ai_resume = self.ai_session.clone().filter(|_| self.ai_has_turn);
+        self.ensure_ai();
+    }
+
+    const AI_MODELS: [(&'static str, &'static str); 5] = [
+        ("default", "your account's default model"),
+        ("fable", "most capable"),
+        ("opus", "strong at long, hard tasks"),
+        ("sonnet", "balanced"),
+        ("haiku", "fastest"),
+    ];
+    const AI_EFFORTS: [(&'static str, &'static str); 6] = [
+        ("default", "the CLI's default"),
+        ("low", "quickest answers"),
+        ("medium", ""),
+        ("high", ""),
+        ("xhigh", ""),
+        ("max", "slowest, most thorough"),
+    ];
+
+    /// A picker over `choices`, with the one in use marked and selected.
+    fn open_assistant_picker(&mut self, title: &str, choices: &[(&str, &str)], current: &str, data: fn(String) -> ItemData) {
+        if !self.cfg.assistant.enabled {
+            self.flash(ASSISTANT_OFF);
+            return;
+        }
+        let current = if current.is_empty() { "default" } else { current };
+        let items: Vec<PaletteItem> = choices
+            .iter()
+            .map(|(name, note)| PaletteItem {
+                label: name.to_string(),
+                detail: match (*name == current, note.is_empty()) {
+                    (true, true) => "current".to_string(),
+                    (true, false) => format!("{note} · current"),
+                    (false, _) => note.to_string(),
+                },
+                data: data(name.to_string()),
+            })
+            .collect();
+        let mut p = PaletteState::new(PaletteKind::Assistant, title, items);
+        if let Some(i) = p.items.iter().position(|it| it.label == current) {
+            p.selected = i;
+        }
+        self.overlay = Some(Overlay::Palette(p));
+    }
+
+    /// Keep an `[assistant]` choice in the config file and say what happened.
+    fn save_assistant_choice(&mut self, key: &str, value: &str, said: String) {
+        match self.cfg.save_assistant(key, value) {
+            Ok(_) => self.flash(said),
+            Err(e) => self.flash_err(format!("{said}, but not saved: {e:#}")),
+        }
+    }
+
+    /// How a configured model shows before the CLI has named the real one.
+    fn model_label(configured: &str) -> String {
+        if configured.is_empty() { "default".to_string() } else { configured.to_string() }
+    }
+
+    /// Switch the panel's model. A running process switches in place.
+    fn set_ai_model(&mut self, model: String) {
+        self.cfg.assistant.model = if model == "default" { String::new() } else { model.clone() };
+        if let Some(chat) = &mut self.chat {
+            chat.model = Self::model_label(&self.cfg.assistant.model);
+        }
+        if let Some(ai) = self.ai.as_ref().filter(|a| a.is_alive()) {
+            ai.send(AiCommand::SetModel(model.clone()));
+        }
+        let value = self.cfg.assistant.model.clone();
+        self.save_assistant_choice("model", &value, format!("assistant model: {model}"));
+    }
+
+    /// Switch the panel's reasoning effort. The CLI only takes it at start,
+    /// so a running process is restarted and resumes the conversation, after
+    /// the turn that is running.
+    fn set_ai_effort(&mut self, effort: String) {
+        self.cfg.assistant.effort = if effort == "default" { String::new() } else { effort.clone() };
+        let busy = self.chat.as_ref().is_some_and(|c| c.busy);
+        let mut said = format!("assistant effort: {effort}");
+        if self.ai.as_ref().is_some_and(AiHandle::is_alive) {
+            if busy {
+                self.ai_restart = true;
+                said.push_str(" (from the next turn)");
+            } else {
+                self.restart_ai();
+            }
+        }
+        self.refresh_chat_chips();
+        let value = self.cfg.assistant.effort.clone();
+        self.save_assistant_choice("effort", &value, said);
+    }
+
+    /// What the next prompt is about: the focused cell. Also keeps the
+    /// header's effort label current.
+    fn refresh_chat_chips(&mut self) {
+        let Some(chat) = &mut self.chat else { return };
+        chat.effort = self.cfg.assistant.effort.clone();
+        // The CLI names the model it really uses with the first turn; until
+        // then the header shows the one that was asked for.
+        if chat.model.is_empty() {
+            chat.model = Self::model_label(&self.cfg.assistant.model);
+        }
+        chat.chips.clear();
+        let Some(cell) = self.nb.cells.get(self.focused) else { return };
+        let kind = match cell.kind {
+            CellKind::Code => "code",
+            CellKind::Markdown => "markdown",
+            CellKind::Raw => "raw",
+        };
+        let mut label = format!("cell {} · {kind}", self.focused + 1);
+        use jupyter_protocol::MediaType as M;
+        let figure = cell
+            .outputs
+            .iter()
+            .filter_map(Output::media)
+            .any(|m| m.content.iter().any(|t| matches!(t, M::Png(_) | M::Jpeg(_) | M::Gif(_) | M::Plotly(_))));
+        if figure {
+            label.push_str(" · figure");
+        } else if !cell.outputs.is_empty() {
+            label.push_str(" · output");
+        }
+        chat.chips.push(label);
+    }
+
+    // ----- proposed edits -------------------------------------------------------
+
+    /// Show `after` as a proposed edit on cell `idx`, as a diff the user
+    /// accepts or rejects. Returns the proposal's id.
+    pub fn propose_edit(&mut self, idx: usize, after: String) -> Option<u64> {
+        (idx < self.nb.cells.len()).then(|| self.propose(idx, ProposalKind::Edit, after, None))
+    }
+
+    /// Put a proposal on cell `idx`. One made by a tool call (`tool`) is
+    /// answered when the user settles it, and takes the user to the cell.
+    fn propose(&mut self, idx: usize, kind: ProposalKind, after: String, tool: Option<(Lane, &str)>) -> u64 {
+        let typing = self.mode == Mode::Edit && self.focus == Focus::Notebook;
+        if self.mode == Mode::Edit && idx == self.focused {
+            self.leave_edit();
+        }
+        self.next_proposal += 1;
+        let id = self.next_proposal;
+        if let Some(old) = self.nb.cells[idx].proposal.take() {
+            self.answer_proposal(old.id, "A newer proposal for the same cell replaced this one.");
+        }
+        let cell = &mut self.nb.cells[idx];
+        cell.proposal = Some(Proposal::of(id, kind, &cell.source, after));
+        self.layout.invalidate_cell(idx);
+        if let Some((lane, tool)) = tool {
+            self.ai_waits.push(ToolWait::Proposal { lane, tool: tool.to_string(), proposal: id });
+            // Someone typing in another cell is left alone; the status bar
+            // counts the proposal.
+            if !typing || idx == self.focused {
+                if self.mode == Mode::Edit {
+                    self.leave_edit();
+                }
+                self.set_focus(idx);
+                self.scroll_to_focused();
+                if self.focus == Focus::Chat {
+                    self.focus = Focus::Notebook;
+                    self.return_to_chat = true;
+                }
+            }
+        }
+        id
+    }
+
+    fn delete_cell_at(&mut self, idx: usize) {
+        let Some(cell) = self.nb.cells.get(idx) else { return };
+        let snapshot = cell.clone();
+        self.cache.invalidate_cell(&snapshot.id);
+        self.nb.apply(CellOp::Delete { idx, cell: snapshot });
+        self.layout.removed(idx);
+        if self.nb.cells.len() == 1 && self.layout.layout(0).is_none() {
+            self.layout.inserted(0);
+        }
+        self.set_focus(idx);
+        self.layout.invalidate_all();
+    }
+
+    /// Accept or reject the proposal on the focused cell; `editing` says the
+    /// user goes on to edit the cell. False when the cell has none.
+    fn settle_proposal(&mut self, accept: bool, editing: bool) -> bool {
+        let idx = self.focused;
+        let Some(p) = self.nb.cells.get_mut(idx).and_then(|c| c.proposal.take()) else { return false };
+        let answer = match (p.kind, accept) {
+            (ProposalKind::Edit | ProposalKind::Insert, true) => {
+                let before = self.nb.cells[idx].clone();
+                let mut after = before.clone();
+                after.set_source(p.after);
+                self.nb.apply(CellOp::Replace { idx, before, after });
+                self.cache.invalidate_cell(&self.nb.cells[idx].id.clone());
+                let what = if p.kind == ProposalKind::Edit {
+                    "The user accepted the edit.".to_string()
+                } else {
+                    format!("The user kept the new cell. It is cell {}.", idx + 1)
+                };
+                if editing {
+                    format!("{what} They opened the cell to edit it further, so read it again before relying on its content.")
+                } else {
+                    what
+                }
+            }
+            (ProposalKind::Edit, false) => {
+                "The user rejected the edit; the cell is unchanged. Ask what they want instead of proposing it again.".to_string()
+            }
+            (ProposalKind::Insert, false) => {
+                self.delete_cell_at(idx);
+                "The user discarded the new cell.".to_string()
+            }
+            (ProposalKind::Delete, true) => {
+                self.delete_cell_at(idx);
+                "The user deleted the cell. The cells after it moved up by one.".to_string()
+            }
+            (ProposalKind::Delete, false) => "The user kept the cell.".to_string(),
+        };
+        self.layout.invalidate_cell(idx);
+        self.scroll_to_focused();
+        self.answer_proposal(p.id, &answer);
+        true
+    }
+
+    /// Answer the tool call that made proposal `id`, if one did. With the
+    /// last of them settled, the keys go back to the panel they came from.
+    fn answer_proposal(&mut self, id: u64, answer: &str) {
+        let Some(i) = self.ai_waits.iter().position(|w| matches!(w, ToolWait::Proposal { proposal, .. } if *proposal == id)) else {
+            return;
+        };
+        if let ToolWait::Proposal { lane, tool, .. } = self.ai_waits.remove(i) {
+            self.tool_reply(lane, tool, answer.to_string(), Vec::new(), false);
+        }
+        let open = self.ai_waits.iter().any(|w| matches!(w, ToolWait::Proposal { .. }));
+        if !open && std::mem::take(&mut self.return_to_chat) && self.chat_open {
+            self.focus = Focus::Chat;
+        }
+    }
+
+    /// Answer proposals that went away without the user settling them (their
+    /// cell was deleted, or replaced by an undo).
+    fn sweep_proposals(&mut self) {
+        let live: Vec<u64> = self.nb.cells.iter().filter_map(|c| c.proposal.as_ref().map(|p| p.id)).collect();
+        let gone: Vec<u64> = self
+            .ai_waits
+            .iter()
+            .filter_map(|w| match w {
+                ToolWait::Proposal { proposal, .. } if !live.contains(proposal) => Some(*proposal),
+                _ => None,
+            })
+            .collect();
+        for id in gone {
+            self.answer_proposal(id, "The proposal went away without an answer: its cell was changed or removed.");
+        }
+    }
+
+    /// Keys of a cell that shows a proposal: Tab accepts, `X` rejects and
+    /// Enter accepts and opens the cell for editing.
+    fn on_proposal_key(&mut self, key: &KeyEvent) -> bool {
+        let Some(kind) = self.nb.cells.get(self.focused).and_then(|c| c.proposal.as_ref()).map(|p| p.kind) else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Tab => self.dispatch(Command::AcceptProposal),
+            KeyCode::Char('X') => self.dispatch(Command::RejectProposal),
+            KeyCode::Enter if key.modifiers.is_empty() && kind != ProposalKind::Delete => {
+                self.settle_proposal(true, true);
+                self.enter_edit(false);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    // ----- inline prompt ----------------------------------------------------------
+
+    /// Start the lean `claude` process behind the inline prompt unless one
+    /// is running: no built-in tools, a short system prompt, a fast model.
+    fn ensure_quick(&mut self) -> &AiHandle {
+        if !self.quick.as_ref().is_some_and(AiHandle::is_alive) {
+            let mut cfg = self.ai_config();
+            cfg.minimal = true;
+            cfg.model = Some(self.cfg.assistant.inline_model.clone()).filter(|m| !m.is_empty());
+            cfg.system_prompt = Some(context::INLINE_PROMPT.to_string());
+            let offered = [tools::EDIT, tools::READ, tools::OUTLINE];
+            cfg.tools = tools::specs().into_iter().filter(|t| offered.contains(&t.name.as_str())).collect();
+            cfg.allowed_tools = tools::allowed();
+            let tx = self.tx.clone();
+            self.quick = Some(AiHandle::spawn_with(cfg, move |ev| {
+                let _ = tx.send(AppEvent::AiQuick(ev));
+            }));
+        }
+        self.quick.as_ref().expect("just started")
+    }
+
+    /// Open the prompt under the focused cell. A visual selection in the
+    /// cell goes along as what the request is about.
+    fn open_inline_prompt(&mut self) {
+        if !matches!(self.screen, Screen::Notebook) {
+            return;
+        }
+        if !self.cfg.assistant.enabled {
+            self.flash(ASSISTANT_OFF);
+            return;
+        }
+        let idx = self.focused;
+        let selection = match (self.mode, self.nb.cells.get(idx).and_then(|c| c.editor.as_ref())) {
+            (Mode::Edit, Some(ed)) => ed.selected_text(),
+            _ => None,
+        };
+        if self.mode == Mode::Edit {
+            self.leave_edit();
+        }
+        self.close_inline_prompt();
+        let Some(cell) = self.nb.cells.get_mut(idx) else { return };
+        cell.prompt = Some(InlinePrompt::new(selection));
+        self.ask_cell = Some(cell.id.clone());
+        self.focus = Focus::Notebook;
+        self.layout.invalidate_cell(idx);
+        self.scroll_to_focused();
+        self.ensure_quick();
+    }
+
+    fn close_inline_prompt(&mut self) {
+        if let Some(id) = self.ask_cell.take()
+            && let Some(idx) = self.nb.index_of(&id)
+        {
+            self.nb.cells[idx].prompt = None;
+            self.layout.invalidate_cell(idx);
+        }
+    }
+
+    fn inline_prompt_mut(&mut self) -> Option<&mut InlinePrompt> {
+        let idx = self.nb.index_of(self.ask_cell.as_ref()?)?;
+        self.nb.cells[idx].prompt.as_mut()
+    }
+
+    fn on_inline_key(&mut self, key: KeyEvent) {
+        let Some(idx) = self.ask_cell.as_ref().and_then(|id| self.nb.index_of(id)) else {
+            self.ask_cell = None;
+            return;
+        };
+        let Some(p) = self.nb.cells[idx].prompt.as_mut() else {
+            self.ask_cell = None;
+            return;
+        };
+        let was_busy = p.busy;
+        match p.handle_key(key) {
+            PromptAction::None => {}
+            PromptAction::Cancel => {
+                if was_busy && let Some(q) = &self.quick {
+                    q.send(AiCommand::Interrupt);
+                }
+                self.close_inline_prompt();
+            }
+            PromptAction::ToChat(text) => {
+                self.close_inline_prompt();
+                if !self.chat_has_keys() {
+                    self.dispatch(Command::ToggleChat);
+                }
+                if let Some(c) = &mut self.chat
+                    && !text.is_empty()
+                {
+                    c.paste(text);
+                }
+            }
+            PromptAction::Send(text) => {
+                p.busy = true;
+                let selection = p.selection.clone();
+                // A proposal still under review is being refined: its tool
+                // call is answered so the next turn can start.
+                let pending = self.nb.cells[idx].proposal.as_ref().map(|p| (p.id, p.after.clone()));
+                if let Some((id, _)) = &pending {
+                    self.answer_proposal(*id, "The user has not accepted this proposal and asks for a change to it; their next message says what.");
+                }
+                let plotly = &self.plotly;
+                let png = |fig: &serde_json::Value| {
+                    plotly.cached(crate::render::hash_bytes(fig.to_string().as_bytes())).map(|p| p.to_vec())
+                };
+                let (mut msg, images) = context::focus_context(&self.nb, idx, &png);
+                if let Some((_, after)) = pending {
+                    msg.push_str(&format!(
+                        "\n\nYour proposed source for this cell, which the user sees as a diff and has not accepted:\n```\n{after}\n```"
+                    ));
+                }
+                if let Some(sel) = selection {
+                    msg.push_str(&format!("\n\nThe user selected this part of the cell:\n```\n{sel}\n```"));
+                }
+                msg.push_str(&format!("\n\nInstruction: {text}"));
+                self.quick_text.clear();
+                self.ensure_quick().send(AiCommand::Send { text: msg, images });
+            }
+        }
+    }
+
+    fn inline_note(&mut self, text: String, error: bool) {
+        if let Some(p) = self.inline_prompt_mut() {
+            p.busy = false;
+            p.note = Some((text, error));
+        }
+    }
+
+    /// What the inline prompt's process says: an edit becomes a proposal
+    /// and closes the prompt, anything else shows under it.
+    fn on_ai_quick(&mut self, ev: AiEvent) {
+        if !matches!(ev, AiEvent::TextDelta(_)) {
+            tracing::debug!("ai quick: {ev:?}");
+        }
+        match ev {
+            AiEvent::Ready { model: Some(m), .. } => self.quick_label = format!("claude · {}", short_model(&m)),
+            AiEvent::TextDelta(text) => self.quick_text.push_str(&text),
+            AiEvent::ToolCall { id, name, arguments, .. } => match self.run_tool(Lane::Quick, &id, &name, &arguments) {
+                Ok(Some((text, images))) => self.tool_reply(Lane::Quick, id, text, images, false),
+                // The proposal is on the cell: the prompt has done its job.
+                Ok(None) => self.close_inline_prompt(),
+                Err(e) => self.tool_reply(Lane::Quick, id, e, Vec::new(), true),
+            },
+            AiEvent::PermissionRequest(r) => {
+                if let Some(q) = &self.quick {
+                    let decision = Permission::deny("Only saturn's notebook tools are available here.");
+                    q.send(AiCommand::PermissionReply { id: r.id, decision });
+                }
+            }
+            AiEvent::RequestCancelled { id } => self.cancel_wait(&id),
+            AiEvent::TurnDone { outcome, .. } => {
+                let said = std::mem::take(&mut self.quick_text);
+                if self.inline_prompt_mut().is_some_and(|p| p.busy) {
+                    match outcome {
+                        TurnOutcome::Error(e) => self.inline_note(e, true),
+                        TurnOutcome::Interrupted => self.inline_note("interrupted".to_string(), false),
+                        TurnOutcome::Completed if said.trim().is_empty() => {
+                            self.inline_note("claude made no change".to_string(), false)
+                        }
+                        TurnOutcome::Completed => self.inline_note(said.trim().to_string(), false),
+                    }
+                }
+            }
+            AiEvent::NotFound { command } => {
+                self.inline_note(format!("`{command}` was not found: install Claude Code and log in"), true);
+                self.quick = None;
+            }
+            AiEvent::NotLoggedIn => {
+                self.inline_note("Claude Code is not logged in: run `claude` and use /login".to_string(), true);
+                self.quick = None;
+            }
+            AiEvent::Died { reason } => {
+                self.inline_note(format!("claude stopped: {reason}"), true);
+                self.quick = None;
+            }
+            _ => {}
+        }
+    }
+
+    // ----- the assistant's tools -------------------------------------------------
+
+    fn tool_reply(&self, lane: Lane, id: String, text: String, images: Vec<Image>, is_error: bool) {
+        let handle = match lane {
+            Lane::Chat => &self.ai,
+            Lane::Quick => &self.quick,
+        };
+        let Some(ai) = handle else { return };
+        let mut content = vec![ToolContent::Text(text)];
+        content.extend(images.into_iter().map(ToolContent::Image));
+        ai.send(AiCommand::ToolReply { id, content, is_error });
+    }
+
+    /// The cells at `indices` as the model reads them.
+    fn cells_for_model(&self, indices: &[usize]) -> (String, Vec<Image>) {
+        let plotly = &self.plotly;
+        let png =
+            |fig: &serde_json::Value| plotly.cached(crate::render::hash_bytes(fig.to_string().as_bytes())).map(|p| p.to_vec());
+        let cells: Vec<(usize, &Cell)> = indices.iter().filter_map(|&i| self.nb.cells.get(i).map(|c| (i + 1, c))).collect();
+        context::cells_context(&cells, &png)
+    }
+
+    /// Run one of saturn's tools for the assistant. `Ok(None)` means the
+    /// answer follows later (the user reviews a proposal, the kernel runs).
+    fn run_tool(
+        &mut self,
+        lane: Lane,
+        id: &str,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<Option<(String, Vec<Image>)>, String> {
+        if !matches!(self.screen, Screen::Notebook) {
+            return Err("no notebook is open".to_string());
+        }
+        let n = self.nb.cells.len();
+        match name {
+            tools::OUTLINE => Ok(Some((tools::outline(&self.nb, self.focused), Vec::new()))),
+            tools::READ => Ok(Some(self.cells_for_model(&tools::cell_indices(args, n)?))),
+            tools::EDIT => {
+                let idx = tools::cell_index(args, "cell", n)?;
+                let current = self.nb.cells[idx].text();
+                let mut source = tools::text_arg(args, "source")?;
+                // Models end a source with a newline; cells do not.
+                if !current.ends_with('\n') {
+                    source = source.trim_end_matches('\n');
+                }
+                let source = source.to_string();
+                if current == source {
+                    return Err("the cell already has exactly this source".to_string());
+                }
+                self.propose(idx, ProposalKind::Edit, source, Some((lane, id)));
+                Ok(None)
+            }
+            tools::INSERT => {
+                let after = args.get("after").and_then(|v| v.as_u64()).ok_or("`after` must be a cell number, or 0")? as usize;
+                if after > n {
+                    return Err(format!("there is no cell {after}: the notebook has cells 1 to {n}"));
+                }
+                let kind = match tools::text_arg(args, "kind")? {
+                    "code" => CellKind::Code,
+                    "markdown" => CellKind::Markdown,
+                    other => return Err(format!("`kind` must be code or markdown, not {other}")),
+                };
+                let source = tools::text_arg(args, "source")?.trim_end_matches('\n').to_string();
+                if self.mode == Mode::Edit {
+                    self.leave_edit();
+                }
+                self.nb.apply(CellOp::Insert { idx: after, cell: Cell::new(kind, "") });
+                self.layout.inserted(after);
+                self.layout.invalidate_all();
+                self.propose(after, ProposalKind::Insert, source, Some((lane, id)));
+                Ok(None)
+            }
+            tools::DELETE => {
+                let idx = tools::cell_index(args, "cell", n)?;
+                self.propose(idx, ProposalKind::Delete, String::new(), Some((lane, id)));
+                Ok(None)
+            }
+            tools::RUN => {
+                let indices = tools::cell_indices(args, n)?;
+                if let Some(&i) = indices.iter().find(|&&i| self.nb.cells[i].kind != CellKind::Code) {
+                    return Err(format!("cell {} is not a code cell", i + 1));
+                }
+                match &self.kernel {
+                    None => return Err("no kernel is running; the user selects one with K".to_string()),
+                    Some(k) if k.status == KernelStatus::Dead => {
+                        return Err("the kernel is dead; the user restarts it with 00".to_string());
+                    }
+                    Some(_) => {}
+                }
+                let cells = indices.iter().map(|&i| self.nb.cells[i].id.clone()).collect();
+                self.run_cells(&indices, true);
+                self.ai_waits.push(ToolWait::Run { lane, tool: id.to_string(), cells });
+                self.check_runs();
+                Ok(None)
+            }
+            _ => Err(format!("saturn has no tool named {name}")),
+        }
+    }
+
+    /// Answer the `run_cells` calls whose cells have all finished.
+    fn check_runs(&mut self) {
+        let running = |nb: &Notebook, id: &CellId| {
+            nb.index_of(id).is_some_and(|i| matches!(nb.cells[i].exec, ExecState::Queued | ExecState::Running))
+        };
+        let mut i = 0;
+        while i < self.ai_waits.len() {
+            let done = match &self.ai_waits[i] {
+                ToolWait::Run { cells, .. } => !cells.iter().any(|id| running(&self.nb, id)),
+                ToolWait::Proposal { .. } => false,
+            };
+            if !done {
+                i += 1;
+                continue;
+            }
+            if let ToolWait::Run { lane, tool, cells } = self.ai_waits.remove(i) {
+                let indices: Vec<usize> = cells.iter().filter_map(|id| self.nb.index_of(id)).collect();
+                let (text, images) = self.cells_for_model(&indices);
+                self.tool_reply(lane, tool, text, images, false);
+            }
+        }
+    }
+
+    /// The assistant withdrew tool call `tool`: its proposal goes away too.
+    fn cancel_wait(&mut self, tool: &str) {
+        let Some(i) = self.ai_waits.iter().position(|w| match w {
+            ToolWait::Proposal { tool: t, .. } | ToolWait::Run { tool: t, .. } => t == tool,
+        }) else {
+            return;
+        };
+        if let ToolWait::Proposal { proposal, .. } = self.ai_waits.remove(i)
+            && let Some(idx) = self.nb.cells.iter().position(|c| c.proposal.as_ref().is_some_and(|p| p.id == proposal))
+        {
+            let kind = self.nb.cells[idx].proposal.take().map(|p| p.kind);
+            self.layout.invalidate_cell(idx);
+            if kind == Some(ProposalKind::Insert) {
+                self.delete_cell_at(idx);
+            }
         }
     }
 
@@ -1040,6 +1984,60 @@ impl App {
                 }
             }
             Command::ForceQuit => self.quit = true,
+            Command::ToggleChat => {
+                if !matches!(self.screen, Screen::Notebook) {
+                    return;
+                }
+                if !self.cfg.assistant.enabled {
+                    self.flash(ASSISTANT_OFF);
+                } else if self.chat_has_keys() {
+                    // A toggle: the panel that has the keys closes. One that
+                    // is open beside the notebook takes the keys instead.
+                    self.close_chat();
+                } else {
+                    self.chat.get_or_insert_with(ChatState::new);
+                    self.chat_open = true;
+                    self.focus = Focus::Chat;
+                    self.refresh_chat_chips();
+                    self.ensure_ai();
+                }
+            }
+            Command::CloseChat => self.close_chat(),
+            Command::AskInline => self.open_inline_prompt(),
+            Command::SelectAiModel => {
+                let current = self.cfg.assistant.model.clone();
+                self.open_assistant_picker("Assistant model", &Self::AI_MODELS, &current, ItemData::Model);
+            }
+            Command::SelectAiEffort => {
+                let current = self.cfg.assistant.effort.clone();
+                self.open_assistant_picker("Assistant effort", &Self::AI_EFFORTS, &current, ItemData::Effort);
+            }
+            Command::ExplainOutput => {
+                self.ask_chat("Explain what this cell's output shows. Lead with the main takeaway, then anything surprising or worth checking.")
+            }
+            Command::FixError => {
+                let failed = self.nb.cells.get(self.focused).is_some_and(|c| c.outputs.iter().any(|o| matches!(o, Output::Error { .. })));
+                if failed {
+                    self.ask_chat("This cell failed. Find the cause of the error and propose a fix for the cell.");
+                } else {
+                    self.flash("this cell has no error");
+                }
+            }
+            Command::NewChat => {
+                if matches!(self.screen, Screen::Notebook) && self.cfg.assistant.enabled {
+                    self.new_chat();
+                }
+            }
+            Command::AcceptProposal => {
+                if !self.settle_proposal(true, false) {
+                    self.flash("no proposed edit on this cell");
+                }
+            }
+            Command::RejectProposal => {
+                if !self.settle_proposal(false, false) {
+                    self.flash("no proposed edit on this cell");
+                }
+            }
         }
     }
 
@@ -1818,6 +2816,8 @@ impl App {
         match data {
             ItemData::Command(cmd) => self.dispatch(cmd),
             ItemData::Theme(name) => self.set_theme(&name),
+            ItemData::Model(model) => self.set_ai_model(model),
+            ItemData::Effort(effort) => self.set_ai_effort(effort),
             ItemData::Project(path) => self.open_file_picker(path, None),
             ItemData::Kernel(i) => {
                 let spec = self.kernelspecs.as_ref().and_then(|s| s.get(i)).cloned();
@@ -2185,6 +3185,38 @@ fn reopen_after(kind: &ConfirmKind, yes: bool) -> Option<(PathBuf, PathBuf)> {
         ConfirmKind::OpenDiscard { path, reopen: Some(start) } if !yes => Some((start.clone(), path.clone())),
         _ => None,
     }
+}
+
+/// `claude-haiku-4-5-20251001` as `haiku-4-5`.
+fn short_model(model: &str) -> String {
+    let m = model.strip_prefix("claude-").unwrap_or(model);
+    match m.rsplit_once('-') {
+        Some((head, tail)) if tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()) => head.to_string(),
+        _ => m.to_string(),
+    }
+}
+
+/// `12345` tokens as `12k`.
+fn tokens(n: u64) -> String {
+    if n >= 1000 { format!("{}k", (n + 500) / 1000) } else { n.to_string() }
+}
+
+/// The argument that says most about a tool call, for the transcript.
+fn tool_detail(input: &serde_json::Value, max: usize) -> String {
+    const KEYS: [&str; 9] = ["command", "file_path", "pattern", "path", "url", "query", "description", "prompt", "skill"];
+    let text = KEYS.iter().find_map(|k| input.get(*k).and_then(|v| v.as_str())).unwrap_or("");
+    // Saturn's own tools name their cells by number.
+    let cells = match (input.get("cell"), input.get("cells")) {
+        _ if input.get("after").is_some_and(|n| n.is_u64()) => format!("after cell {}", input["after"]),
+        (Some(n), _) if n.is_u64() => format!("cell {n}"),
+        (_, Some(serde_json::Value::Array(list))) => {
+            format!("cell {}", list.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))
+        }
+        _ => String::new(),
+    };
+    let text = if text.is_empty() { cells.as_str() } else { text };
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    ui::text::cut(&one_line, max)
 }
 
 #[cfg(test)]
