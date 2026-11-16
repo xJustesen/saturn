@@ -47,6 +47,44 @@ pub struct Config {
     /// Dashboard "Projects": folders searched (a few levels deep) for git
     /// repositories. `~` is expanded; folders that don't exist are skipped.
     pub project_roots: Vec<String>,
+    /// The built-in assistant (`[assistant]`).
+    pub assistant: Assistant,
+}
+
+/// The built-in assistant, which runs on the user's own `claude` CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Assistant {
+    /// Off: the panel and the inline prompt do not open.
+    pub enabled: bool,
+    /// The Claude Code program to run.
+    pub command: String,
+    /// Model of the panel's conversation; empty is the account's default.
+    pub model: String,
+    /// Model behind the inline prompt, where speed matters most.
+    pub inline_model: String,
+    /// Reasoning effort of the panel's conversation (`low` … `max`); empty
+    /// is the CLI's default.
+    pub effort: String,
+    /// Also load the MCP servers configured for Claude Code. Slower to start.
+    pub user_mcp: bool,
+    /// Keep `ANTHROPIC_API_KEY` in the CLI's environment, which makes it
+    /// bill the API instead of using the subscription login.
+    pub use_api_key: bool,
+}
+
+impl Default for Assistant {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            command: "claude".to_string(),
+            model: String::new(),
+            inline_model: "haiku".to_string(),
+            effort: String::new(),
+            user_mcp: false,
+            use_api_key: false,
+        }
+    }
 }
 
 impl Default for Config {
@@ -69,6 +107,7 @@ impl Default for Config {
             project_roots: ["~/dev", "~/code", "~/projects", "~/src"]
                 .map(String::from)
                 .to_vec(),
+            assistant: Assistant::default(),
         }
     }
 }
@@ -188,6 +227,16 @@ pub fn write_key(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_assistant_table_is_optional_and_overridable() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.assistant.enabled);
+        assert_eq!(cfg.assistant.inline_model, "haiku");
+        let cfg: Config = toml::from_str("[assistant]\nenabled = false\nmodel = \"sonnet\"").unwrap();
+        assert!(!cfg.assistant.enabled);
+        assert_eq!((cfg.assistant.model.as_str(), cfg.assistant.command.as_str()), ("sonnet", "claude"));
+    }
 
     fn temp_file(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("saturn-config-test-{}-{name}", std::process::id()));

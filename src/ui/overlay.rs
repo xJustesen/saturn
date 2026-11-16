@@ -324,6 +324,11 @@ NOTEBOOK (command mode)            CELL EDITING
   K              select kernel        Ctrl+S   save
   Ctrl+P         command palette      Ctrl+O   find file
   ?              this help            q        quit
+ASSISTANT (your Claude Code login)
+  Ctrl+L         chat panel: open / focus; again or Esc returns to the notebook
+  Ctrl+G         ask for a change to this cell, inline
+  Tab / X / Enter  on a proposed change: accept / reject / accept and edit
+  in the panel   Enter send · Alt+Enter new line · Ctrl+C stop · q close
 ";
 
 fn render_help(buf: &mut Buffer, area: Rect, theme: &Theme) {

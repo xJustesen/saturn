@@ -109,8 +109,8 @@ enum ToolWait {
     Run { lane: Lane, tool: String, cells: Vec<CellId> },
 }
 
-/// The model behind the inline prompt: quick edits want speed over depth.
-const QUICK_MODEL: &str = "haiku";
+/// What a disabled assistant answers its keys with.
+const ASSISTANT_OFF: &str = "the assistant is off: set enabled = true under [assistant] in config.toml";
 
 /// Which pane of the notebook screen has the keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +235,7 @@ impl App {
             ai: None,
             quick: None,
             quick_text: String::new(),
-            quick_label: format!("claude · {QUICK_MODEL}"),
+            quick_label: format!("claude · {}", cfg.assistant.inline_model),
             ask_cell: None,
             kernelspecs: None,
             line_numbers: cfg.line_numbers,
@@ -813,11 +813,23 @@ impl App {
         crate::files::root::find_root(&dir).root
     }
 
+    /// How either assistant process is started, from the `[assistant]` config.
+    fn ai_config(&self) -> AiConfig {
+        let a = &self.cfg.assistant;
+        let mut cfg = AiConfig::new(self.ai_dir());
+        cfg.command = a.command.clone();
+        cfg.user_mcp = a.user_mcp;
+        cfg.use_api_key = a.use_api_key;
+        cfg
+    }
+
     /// Start the assistant's `claude` process unless one is running. It
     /// spends nothing until the first prompt, so the panel starts it early.
     fn ensure_ai(&mut self) -> &AiHandle {
         if !self.ai.as_ref().is_some_and(AiHandle::is_alive) {
-            let mut cfg = AiConfig::new(self.ai_dir());
+            let mut cfg = self.ai_config();
+            cfg.model = Some(self.cfg.assistant.model.clone()).filter(|m| !m.is_empty());
+            cfg.effort = Some(self.cfg.assistant.effort.clone()).filter(|e| !e.is_empty());
             cfg.system_prompt = Some(context::SYSTEM_PROMPT.to_string());
             cfg.disallowed_tools = vec!["NotebookEdit".to_string()];
             cfg.tools = tools::specs();
@@ -831,17 +843,7 @@ impl App {
         let Some(chat) = &mut self.chat else { return };
         match chat.handle_key(key) {
             ChatAction::None => {}
-            ChatAction::Send(prompt) => {
-                chat.push_user(prompt.clone());
-                chat.busy = true;
-                let plotly = &self.plotly;
-                let png = |fig: &serde_json::Value| {
-                    plotly.cached(crate::render::hash_bytes(fig.to_string().as_bytes())).map(|p| p.to_vec())
-                };
-                let (ctx, images) = context::focus_context(&self.nb, self.focused, &png);
-                let text = if ctx.is_empty() { prompt } else { format!("{ctx}\n\n{prompt}") };
-                self.ensure_ai().send(AiCommand::Send { text, images });
-            }
+            ChatAction::Send(prompt) => self.send_chat(prompt),
             ChatAction::Interrupt => {
                 if let Some(ai) = &self.ai {
                     ai.send(AiCommand::Interrupt);
@@ -869,6 +871,40 @@ impl App {
             ChatAction::Blur => self.focus = Focus::Notebook,
             ChatAction::Close => self.close_chat(),
         }
+    }
+
+    /// Send `prompt` to the panel's conversation, with the focused cell as
+    /// what it is about.
+    fn send_chat(&mut self, prompt: String) {
+        let chat = self.chat.get_or_insert_with(ChatState::new);
+        chat.push_user(prompt.clone());
+        chat.busy = true;
+        let plotly = &self.plotly;
+        let png = |fig: &serde_json::Value| {
+            plotly.cached(crate::render::hash_bytes(fig.to_string().as_bytes())).map(|p| p.to_vec())
+        };
+        let (ctx, images) = context::focus_context(&self.nb, self.focused, &png);
+        let text = if ctx.is_empty() { prompt } else { format!("{ctx}\n\n{prompt}") };
+        self.ensure_ai().send(AiCommand::Send { text, images });
+    }
+
+    /// Open the panel and ask `prompt` about the focused cell right away.
+    fn ask_chat(&mut self, prompt: &str) {
+        if !matches!(self.screen, Screen::Notebook) {
+            return;
+        }
+        if !self.cfg.assistant.enabled {
+            self.flash(ASSISTANT_OFF);
+            return;
+        }
+        if self.mode == Mode::Edit {
+            self.leave_edit();
+        }
+        self.chat.get_or_insert_with(ChatState::new);
+        self.chat_open = true;
+        self.focus = Focus::Chat;
+        self.refresh_chat_chips();
+        self.send_chat(prompt.to_string());
     }
 
     /// Hide the panel; the conversation stays for the next time it opens.
@@ -1067,9 +1103,9 @@ impl App {
     /// is running: no built-in tools, a short system prompt, a fast model.
     fn ensure_quick(&mut self) -> &AiHandle {
         if !self.quick.as_ref().is_some_and(AiHandle::is_alive) {
-            let mut cfg = AiConfig::new(self.ai_dir());
+            let mut cfg = self.ai_config();
             cfg.minimal = true;
-            cfg.model = Some(QUICK_MODEL.to_string());
+            cfg.model = Some(self.cfg.assistant.inline_model.clone()).filter(|m| !m.is_empty());
             cfg.system_prompt = Some(context::INLINE_PROMPT.to_string());
             let offered = [tools::EDIT, tools::READ, tools::OUTLINE];
             cfg.tools = tools::specs().into_iter().filter(|t| offered.contains(&t.name.as_str())).collect();
@@ -1086,6 +1122,10 @@ impl App {
     /// cell goes along as what the request is about.
     fn open_inline_prompt(&mut self) {
         if !matches!(self.screen, Screen::Notebook) {
+            return;
+        }
+        if !self.cfg.assistant.enabled {
+            self.flash(ASSISTANT_OFF);
             return;
         }
         let idx = self.focused;
@@ -1818,7 +1858,9 @@ impl App {
                 if !matches!(self.screen, Screen::Notebook) {
                     return;
                 }
-                if self.chat_has_keys() {
+                if !self.cfg.assistant.enabled {
+                    self.flash(ASSISTANT_OFF);
+                } else if self.chat_has_keys() {
                     self.focus = Focus::Notebook;
                 } else {
                     self.chat.get_or_insert_with(ChatState::new);
@@ -1830,8 +1872,19 @@ impl App {
             }
             Command::CloseChat => self.close_chat(),
             Command::AskInline => self.open_inline_prompt(),
+            Command::ExplainOutput => {
+                self.ask_chat("Explain what this cell's output shows. Lead with the main takeaway, then anything surprising or worth checking.")
+            }
+            Command::FixError => {
+                let failed = self.nb.cells.get(self.focused).is_some_and(|c| c.outputs.iter().any(|o| matches!(o, Output::Error { .. })));
+                if failed {
+                    self.ask_chat("This cell failed. Find the cause of the error and propose a fix for the cell.");
+                } else {
+                    self.flash("this cell has no error");
+                }
+            }
             Command::NewChat => {
-                if matches!(self.screen, Screen::Notebook) {
+                if matches!(self.screen, Screen::Notebook) && self.cfg.assistant.enabled {
                     self.new_chat();
                 }
             }
