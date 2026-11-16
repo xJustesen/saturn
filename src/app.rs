@@ -25,6 +25,7 @@ use crate::vim::Request;
 use crate::files::projects::Project;
 use crate::files::{FileEntry, PickerPrefs};
 use crate::files::preview::{PreviewWorker, UiColors};
+use crate::ai::{AiCommand, AiEvent, AiHandle};
 use crate::kernel::{KernelCommand, KernelEvent, KernelHandle, KernelStatus, ReplyStatus, startup};
 use crate::keymap::{self, Key, KeyAction};
 use crate::notebook::undo::CellOp;
@@ -51,6 +52,8 @@ use crate::ui::popout::{PopoutAction, PopoutState};
 pub enum AppEvent {
     Terminal(Event),
     Kernel(KernelEvent),
+    /// From the assistant's `claude` process.
+    Ai(AiEvent),
     ImageReady { hash: u64, result: Result<SlicedProtocol, String> },
     PlotlyDone { hash: u64, result: Result<Vec<u8>, String> },
     PlotlyFatal(String),
@@ -120,6 +123,8 @@ pub struct App {
     pub images: ImageStore,
     pub plotly: PlotlySidecar,
     pub kernel: Option<KernelHandle>,
+    /// The assistant's `claude` process, once something has started it.
+    pub ai: Option<AiHandle>,
     pub kernelspecs: Option<Vec<KernelspecDir>>,
     pub cfg: Config,
     pub theme: Theme,
@@ -190,6 +195,7 @@ impl App {
             images,
             plotly,
             kernel: None,
+            ai: None,
             kernelspecs: None,
             line_numbers: cfg.line_numbers,
             picker_prefs: PickerPrefs { show_hidden: cfg.show_hidden, show_ignored: cfg.show_ignored },
@@ -322,6 +328,10 @@ impl App {
             k.send(KernelCommand::Shutdown);
             let _ = tokio::time::timeout(Duration::from_secs(3), k.wait()).await;
         }
+        if let Some(ai) = self.ai.take() {
+            ai.send(AiCommand::Shutdown);
+            let _ = tokio::time::timeout(Duration::from_secs(2), ai.wait()).await;
+        }
         Ok(())
     }
 
@@ -339,6 +349,19 @@ impl App {
             if self.pixel_mouse {
                 let _ = crossterm::execute!(out, Print(PIXEL_MOUSE_ON));
             }
+        }
+    }
+
+    /// The assistant has no UI yet: its events only reach the log.
+    fn on_ai(&mut self, ev: AiEvent) {
+        match &ev {
+            // Streamed text would drown the log.
+            AiEvent::TextDelta(text) => tracing::trace!("ai: +{} bytes", text.len()),
+            AiEvent::NotFound { .. } | AiEvent::NotLoggedIn | AiEvent::Died { .. } => {
+                tracing::warn!("ai: {ev:?}");
+                self.ai = None;
+            }
+            _ => tracing::debug!("ai: {ev:?}"),
         }
     }
 
@@ -392,6 +415,7 @@ impl App {
                 self.on_kernel(ev);
                 self.dirty_ui = true;
             }
+            AppEvent::Ai(ev) => self.on_ai(ev),
             AppEvent::ImageReady { hash, result } => {
                 self.images.set_result(hash, result);
                 // A frame of the popout's live figure changes no layout.
