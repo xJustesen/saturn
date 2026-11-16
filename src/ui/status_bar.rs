@@ -37,6 +37,9 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     let mode = |label: &'static str, bg: Color| (label, Style::default().bg(bg).fg(ui.mode_fg).add_modifier(Modifier::BOLD));
     let (mode_label, mode_style) = match app.mode {
         _ if app.ask_cell.is_some() => mode(" ASK ", ui.mode_chat),
+        _ if app.focus == Focus::Chat && app.chat_open && app.chat.as_ref().is_some_and(|c| c.reading()) => {
+            mode(" READ ", ui.mode_normal)
+        }
         _ if app.focus == Focus::Chat && app.chat_open => mode(" CHAT ", ui.mode_chat),
         Mode::Command if app.search.input.is_some() => mode(" SEARCH ", ui.mode_search),
         Mode::Command => mode(" COMMAND ", ui.mode_command),

@@ -334,7 +334,8 @@ ASSISTANT (your Claude Code login)
   Ctrl+L         chat panel: open, close; Esc keeps it open, back to the notebook
   Ctrl+G         ask for a change to this cell, inline
   Tab / X / Enter  on a proposed change: accept / reject / accept and edit
-  in the panel   Enter send · Alt+Enter new line · Ctrl+C stop · q close
+  in the panel   Enter send · Alt+Enter new line · Ctrl+C stop
+  Esc            read the reply: j k · Ctrl+D/U · gg G scroll, i types, q closes
   Ctrl+P         Assistant: select model / select effort / new chat
 ";
 

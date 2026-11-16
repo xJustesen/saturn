@@ -14,7 +14,6 @@ use crate::render::render_markdown;
 use crate::theme::Theme;
 use crate::ui::cell::{EditorOpts, draw_editor};
 use crate::ui::text::{clean_text, cut, wrap_line, wrap_words};
-use crate::vim::Mode as VimMode;
 
 /// Narrowest panel that is still usable.
 pub const MIN_WIDTH: u16 = 40;
@@ -23,7 +22,7 @@ const MAX_INPUT_ROWS: u16 = 8;
 /// Columns left of the text (the user bar and the prompt sit in them).
 const PAD_LEFT: u16 = 3;
 const PAD_RIGHT: u16 = 1;
-const HINTS: &str = "⏎ send  ⌥⏎ newline  esc normal";
+const HINTS: &str = "⏎ send  ⌥⏎ newline  esc read";
 const EMPTY: &str = "Ask about the focused cell, its output or the project.";
 
 /// Panel width for a main area `width` columns wide, or `None` when the
@@ -101,6 +100,19 @@ struct Row {
     bar: bool,
 }
 
+/// Which part of the transcript the panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// The newest rows; the view follows what is written.
+    End,
+    /// The item with this index at the top, so a reply reads from its
+    /// question down. Until the rows from there fill the panel this is the
+    /// same as `End`.
+    Pinned(usize),
+    /// This row at the top: where the user scrolled to.
+    Row(usize),
+}
+
 pub struct ChatState {
     items: Vec<Item>,
     /// Wrapped rows per item at `rows_width`; `None` is stale.
@@ -109,10 +121,17 @@ pub struct ChatState {
     pub input: CellEditor,
     /// What the next prompt is about ("cell 7 · code · figure").
     pub chips: Vec<String>,
-    /// Rows scrolled up from the newest row; 0 follows the transcript.
-    scroll: usize,
+    view: View,
+    /// The top row and the highest possible top row as last drawn; scrolling
+    /// starts from them.
+    top_row: usize,
+    max_top: usize,
     /// Transcript rows on screen, for paging.
     view_rows: usize,
+    /// Reading mode: the keys scroll the transcript instead of typing.
+    reading: bool,
+    /// `g` was pressed in reading mode and waits for the second one.
+    pending_g: bool,
     /// A permission request waiting for an answer; it takes the keys.
     pub ask: Option<Ask>,
     /// A turn is running.
@@ -140,8 +159,12 @@ impl ChatState {
             rows_width: 0,
             input,
             chips: Vec::new(),
-            scroll: 0,
+            view: View::End,
+            top_row: 0,
+            max_top: 0,
             view_rows: 1,
+            reading: false,
+            pending_g: false,
             ask: None,
             busy: false,
             model: String::new(),
@@ -154,14 +177,22 @@ impl ChatState {
         &self.items
     }
 
+    /// The keys scroll the transcript (after Esc) rather than type.
+    pub fn reading(&self) -> bool {
+        self.reading
+    }
+
     fn push(&mut self, item: Item) {
         self.items.push(item);
         self.rows.push(None);
-        self.scroll = 0;
     }
 
+    /// The user's prompt. The view rests on it, so the reply that follows
+    /// is read from its start however long it gets.
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.push(Item::User(text.into()));
+        self.view = View::Pinned(self.items.len() - 1);
+        self.reading = false;
     }
 
     /// Streamed assistant text: extends the message being written.
@@ -216,26 +247,63 @@ impl ChatState {
     pub fn clear(&mut self) {
         self.items.clear();
         self.rows.clear();
-        self.scroll = 0;
+        self.view = View::End;
     }
 
     pub fn paste(&mut self, text: String) {
         self.input.paste(text);
     }
 
-    fn scroll_by(&mut self, up: bool, rows: usize) {
-        self.scroll = if up {
-            self.scroll.saturating_add(rows)
+    /// Put row `row` at the top (clamped). Reaching the end follows it again.
+    fn scroll_to(&mut self, row: isize) {
+        let row = row.clamp(0, self.max_top as isize) as usize;
+        // Kept current here too: several keys can arrive between two frames.
+        self.top_row = row;
+        self.view = if row >= self.max_top {
+            View::End
         } else {
-            self.scroll.saturating_sub(rows)
+            View::Row(row)
         };
+    }
+
+    fn scroll_by(&mut self, rows: isize) {
+        self.scroll_to(self.top_row as isize + rows);
+    }
+
+    /// Keys of reading mode: vim's motions scroll the transcript.
+    fn reading_key(&mut self, key: KeyEvent) -> ChatAction {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let page = self.view_rows.max(1) as isize;
+        let half = (page / 2).max(1);
+        let pending_g = std::mem::take(&mut self.pending_g);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_by(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_by(-1),
+            KeyCode::Char('d') if ctrl => self.scroll_by(half),
+            KeyCode::Char('u') if ctrl => self.scroll_by(-half),
+            KeyCode::Char('f') if ctrl => self.scroll_by(page),
+            KeyCode::Char('b') if ctrl => self.scroll_by(-page),
+            KeyCode::Char('e') if ctrl => self.scroll_by(1),
+            KeyCode::Char('y') if ctrl => self.scroll_by(-1),
+            KeyCode::Char('G') | KeyCode::End => self.scroll_to(isize::MAX),
+            KeyCode::Char('g') if pending_g => self.scroll_to(0),
+            KeyCode::Char('g') => self.pending_g = true,
+            KeyCode::Home => self.scroll_to(0),
+            KeyCode::Char('i' | 'a' | 'o') | KeyCode::Enter if !ctrl => self.reading = false,
+            KeyCode::Char('q') => return ChatAction::Close,
+            // Back to the notebook; the panel takes input again next time.
+            KeyCode::Esc => {
+                self.reading = false;
+                return ChatAction::Blur;
+            }
+            _ => {}
+        }
+        ChatAction::None
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
-        let insert = matches!(self.input.mode(), VimMode::Insert | VimMode::Replace);
-        let half = (self.view_rows / 2).max(1);
+        let page = self.view_rows.max(1) as isize;
         if self.ask.is_some() {
             let answer = match key.code {
                 KeyCode::Char('l') if ctrl => return ChatAction::Close,
@@ -259,19 +327,20 @@ impl ChatState {
                     ChatAction::None
                 };
             }
-            KeyCode::PageUp => self.scroll_by(true, self.view_rows.max(1)),
-            KeyCode::PageDown => self.scroll_by(false, self.view_rows.max(1)),
-            KeyCode::Char('u') if ctrl && !insert => self.scroll_by(true, half),
-            KeyCode::Char('d') if ctrl && !insert => self.scroll_by(false, half),
+            KeyCode::PageUp => self.scroll_by(-page),
+            KeyCode::PageDown => self.scroll_by(page),
+            _ if self.reading => return self.reading_key(key),
+            KeyCode::Esc => {
+                self.reading = true;
+                self.pending_g = false;
+            }
             KeyCode::Enter
                 if key
                     .modifiers
                     .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
-                if insert {
-                    self.input
-                        .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-                }
+                self.input
+                    .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let text = self.input.text().trim().to_string();
@@ -282,11 +351,10 @@ impl ChatState {
                 self.input.enter_insert();
                 return ChatAction::Send(text);
             }
-            KeyCode::Esc if self.input.at_rest() => return ChatAction::Blur,
-            KeyCode::Char('q') if plain && self.input.at_rest() => return ChatAction::Close,
             _ => {
                 self.input.key(key);
-                // `:w`, `:q` and messages mean nothing for a prompt.
+                // The draft is only ever typed into: Esc reads the
+                // transcript, so the editor never leaves insert mode.
                 self.input.take_requests();
             }
         }
@@ -479,7 +547,8 @@ pub fn render(
             }
         }
         let input_y = foot_y + 1 + chip_rows;
-        let prompt = if focused {
+        let reading = st.reading;
+        let prompt = if focused && !reading {
             Style::default().fg(ui.focus)
         } else {
             theme.muted()
@@ -503,7 +572,6 @@ pub fn render(
             tab,
         };
         let clip = Rect::new(area.x, input_y, area.width, input_rows);
-        let insert = matches!(st.input.mode(), VimMode::Insert | VimMode::Replace);
         cursor = draw_editor(
             &mut st.input,
             &opts,
@@ -514,19 +582,50 @@ pub fn render(
             -(first as i32),
             buf,
         );
-        if st.input.text().is_empty() && (insert || !focused) {
+        if reading {
+            // The draft waits, dimmed, and takes no cursor.
+            cursor = None;
+            buf.set_style(
+                Rect::new(area.x, foot_y + 1, area.width, chip_rows + input_rows),
+                theme.muted(),
+            );
+        }
+        if st.input.text().is_empty() {
             let hint = match st.chips.first() {
+                _ if reading => "i to type".to_string(),
                 Some(c) => format!("ask about {}", c.split(" · ").next().unwrap_or(c)),
                 None => "ask claude".to_string(),
             };
             buf.set_string(x, input_y, cut(&hint, w as usize), theme.placeholder());
         }
-        buf.set_string(
-            x,
-            area.y + area.height - 1,
-            cut(HINTS, w as usize),
-            Style::default().fg(ui.line_numbers),
-        );
+        let hints_y = area.y + area.height - 1;
+        if reading && focused {
+            let key = |s: &'static str| {
+                Span::styled(
+                    s,
+                    Style::default().fg(ui.focus).add_modifier(Modifier::BOLD),
+                )
+            };
+            let dim = |s: &'static str| Span::styled(s, theme.muted());
+            let keys = Line::from(vec![
+                key("j k"),
+                dim(" scroll "),
+                key("^D ^U"),
+                dim(" page "),
+                key("gg G"),
+                dim(" ends "),
+                key("i"),
+                dim(" type"),
+            ]);
+            buf.set_line(x, hints_y, &keys, w);
+        } else {
+            buf.set_string(
+                x,
+                hints_y,
+                cut(HINTS, w as usize),
+                Style::default().fg(ui.line_numbers),
+            );
+        }
     }
 
     // transcript
@@ -549,34 +648,73 @@ pub fn render(
             bar: false,
         };
         let mut all: Vec<&Row> = Vec::new();
+        // The row each item starts at.
+        let mut starts: Vec<usize> = Vec::with_capacity(st.items.len());
         let mut prev_tool = false;
         for (item, rows) in st.items.iter().zip(&st.rows) {
             let tool = matches!(item, Item::Tool { .. });
             if !all.is_empty() && !(tool && prev_tool) {
                 all.push(&blank);
             }
+            starts.push(all.len());
             all.extend(rows.iter().flatten());
             prev_tool = tool;
         }
-        st.scroll = st.scroll.min(all.len().saturating_sub(h));
-        let start = all.len().saturating_sub(h + st.scroll);
+        let max_top = all.len().saturating_sub(h);
+        let first = match st.view {
+            View::End => max_top,
+            View::Pinned(i) => starts.get(i).copied().unwrap_or(max_top).min(max_top),
+            View::Row(r) => r.min(max_top),
+        };
+        st.top_row = first;
+        st.max_top = max_top;
         // One spare row under the header when the transcript does not fill it.
         let lead = usize::from(all.len() < h);
-        for (i, row) in all.iter().skip(start).take(h - lead).enumerate() {
+        for (i, row) in all.iter().skip(first).take(h - lead).enumerate() {
             let y = top + (i + lead) as u16;
             if row.bar {
                 buf.set_string(area.x + 1, y, "┃", Style::default().fg(ui.mode_visual));
             }
             buf.set_line(x, y, &row.line, w);
         }
-        if st.scroll > 0 {
-            let more = format!(" ↓ {} ", st.scroll);
+        // What is out of view, on the rules above and below, and a scroll
+        // bar in the right margin.
+        let right = area.x + area.width - 1;
+        let mut mark = |y: u16, text: String, st: Style| {
+            let text = format!(" {text} ");
             buf.set_string(
-                area.x + area.width - 1 - more.chars().count() as u16,
-                foot_y,
-                &more,
-                theme.muted(),
+                right.saturating_sub(text.chars().count() as u16),
+                y,
+                &text,
+                st,
             );
+        };
+        if first > 0 {
+            mark(area.y + 1, format!("↑ {first} above"), theme.muted());
+        }
+        if first < max_top {
+            mark(
+                foot_y,
+                format!("↓ {} more", max_top - first),
+                Style::default().fg(ui.warning),
+            );
+        }
+        if max_top > 0 && h > 0 {
+            let size = (h * h / all.len()).clamp(1, h);
+            let pos = first * (h - size) / max_top;
+            let thumb = if st.reading && focused {
+                Style::default().fg(ui.focus)
+            } else {
+                theme.muted()
+            };
+            for i in 0..h {
+                let (glyph, style) = if (pos..pos + size).contains(&i) {
+                    ("┃", thumb)
+                } else {
+                    ("│", rule)
+                };
+                buf.set_string(right, top + i as u16, glyph, style);
+            }
         }
     }
     if focused { cursor } else { None }
@@ -585,6 +723,7 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vim::Mode as VimMode;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -633,16 +772,119 @@ mod tests {
     }
 
     #[test]
-    fn esc_goes_to_normal_then_back_to_the_notebook() {
+    fn esc_reads_then_goes_back_to_the_notebook() {
         let mut st = ChatState::new();
-        typed(&mut st, "q");
+        typed(&mut st, "draft");
         assert_eq!(st.handle_key(key(KeyCode::Esc)), ChatAction::None);
-        assert_eq!(st.handle_key(key(KeyCode::Esc)), ChatAction::Blur);
+        assert!(st.reading());
+        // Reading mode types nothing; `i` goes back to the draft.
+        assert_eq!(st.handle_key(key(KeyCode::Char('x'))), ChatAction::None);
+        assert_eq!(st.handle_key(key(KeyCode::Char('i'))), ChatAction::None);
+        assert!(!st.reading());
+        typed(&mut st, "!");
+        assert_eq!(st.input.text(), "draft!");
+        st.handle_key(key(KeyCode::Esc));
         assert_eq!(st.handle_key(key(KeyCode::Char('q'))), ChatAction::Close);
+        assert_eq!(st.handle_key(key(KeyCode::Esc)), ChatAction::Blur);
+        assert!(
+            !st.reading(),
+            "the panel takes input again when it gets the keys back"
+        );
         assert_eq!(
             st.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
             ChatAction::Close
         );
+    }
+
+    /// A conversation with a reply far longer than the panel.
+    fn long_reply() -> ChatState {
+        let mut st = ChatState::new();
+        st.notice("earlier", false);
+        st.push_user("walk me through it");
+        let reply: Vec<String> = (1..=40).map(|i| format!("reply line {i}")).collect();
+        st.push_delta(&reply.join("\n\n"));
+        st
+    }
+
+    #[test]
+    fn a_long_reply_rests_on_its_question() {
+        let mut st = long_reply();
+        let s = screen(&mut st, 44, 20, true);
+        let rows: Vec<&str> = s.lines().collect();
+        assert!(rows[2].contains("┃ walk me through it"), "{s}");
+        assert!(
+            s.contains("reply line 1 ") && !s.contains("reply line 40"),
+            "{s}"
+        );
+        assert!(rows[1].contains("↑ 2 above"), "{s}");
+        assert!(s.contains("↓ ") && s.contains(" more"), "{s}");
+        // More text arriving does not move the view.
+        st.push_delta("\n\nthe end");
+        let again = screen(&mut st, 44, 20, true);
+        assert!(
+            again.lines().nth(2).unwrap().contains("walk me through it"),
+            "{again}"
+        );
+    }
+
+    #[test]
+    fn a_short_reply_keeps_the_history_in_view() {
+        let mut st = ChatState::new();
+        st.notice("earlier", false);
+        st.push_user("hi");
+        st.push_delta("hello");
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.contains("earlier") && s.contains("hello"), "{s}");
+        assert!(!s.contains("above") && !s.contains("more"), "{s}");
+    }
+
+    #[test]
+    fn reading_mode_scrolls_with_vim_motions() {
+        let mut st = long_reply();
+        screen(&mut st, 44, 20, true);
+        st.handle_key(key(KeyCode::Esc));
+        let s = screen(&mut st, 44, 20, true);
+        assert!(
+            s.lines()
+                .last()
+                .unwrap()
+                .contains("j k scroll ^D ^U page gg G ends i type"),
+            "{s}"
+        );
+        assert!(s.contains("i to type"), "{s}");
+
+        st.handle_key(key(KeyCode::Char('G')));
+        let s = screen(&mut st, 44, 20, true);
+        assert!(
+            s.contains("reply line 40") && !s.contains("walk me through it"),
+            "{s}"
+        );
+        assert!(!s.contains(" more"), "{s}");
+
+        st.handle_key(key(KeyCode::Char('g')));
+        st.handle_key(key(KeyCode::Char('g')));
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.contains("earlier") && !s.contains("above"), "{s}");
+
+        st.handle_key(key(KeyCode::Char('j')));
+        st.handle_key(key(KeyCode::Char('j')));
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.lines().nth(1).unwrap().contains("↑ 2 above"), "{s}");
+        st.handle_key(key(KeyCode::Char('k')));
+        st.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.lines().nth(1).unwrap().contains("↑ 8 above"), "{s}");
+
+        // Sending a new prompt leaves reading mode and rests on that prompt.
+        st.handle_key(key(KeyCode::Char('i')));
+        typed(&mut st, "next");
+        assert_eq!(
+            st.handle_key(key(KeyCode::Enter)),
+            ChatAction::Send("next".into())
+        );
+        st.push_user("next");
+        let s = screen(&mut st, 44, 20, true);
+        assert!(s.contains("┃ next") && s.contains("reply line 40"), "{s}");
     }
 
     #[test]

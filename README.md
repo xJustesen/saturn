@@ -89,6 +89,9 @@ login: no API key, and saturn never sees your credentials.
 - **`Ctrl+L`** opens a chat panel beside the notebook. Each prompt carries the focused cell, its
   outputs and its figures, so "why is this plot empty?" works as asked. `Ctrl+L` again closes the
   panel (the conversation is kept); `Esc` goes back to the notebook and leaves it open.
+- **Long replies** rest on your question, so you read them from the top; a marker shows how much
+  is below. `Esc` in the panel is a reading mode: `j`/`k`, `Ctrl+D`/`Ctrl+U` and `gg`/`G` scroll,
+  `i` goes back to typing, `Esc` again returns to the notebook.
 - **`Ctrl+G`** opens a one-line prompt under the cell for a quick edit, answered by a fast model.
 - **Changes are proposals.** An edit, a new cell or a deletion shows in the notebook as a diff:
   `Tab` accepts (one undo step), `X` rejects, `Enter` accepts and opens the cell.
